@@ -100,16 +100,17 @@ Submit a PR or donate and I will do it for you.
 - [Telegram chat](https://t.me/swapcli)
 - [GitHub issues](https://github.com/lfaoro/swap/issues)
 
-## Help swap grow
+## Show support
 
-> With your help, we can make swap better.
+> If `swap` is useful to you, please consider giving it a ⭐.
 
-- **Star the repo**
-- **Tell your friends**
-- XMR support [**89XCyahmZiQgcVwjrSZTcJepPqCxZgMqwbABvzPKVpzC7gi8URDme8H6UThpCqX69y5i1aA81AKq57Wynjovy7g4K9MeY5c**]
-- BTC support [**bc1qzaqeqwklaq86uz8h2lww87qwfpnyh9fveyh3hs**]
+- **star the repo**
+- **tell your friends**
+
 - [GitHub sponsor](https://github.com/sponsors/lfaoro)
-- [FIAT support](https://checkout.revolut.com/pay/7c8fae59-f65b-44de-9875-39dc014dc817)
+- [BTC sponsor](https://mempool.space/address/bc1qzaqeqwklaq86uz8h2lww87qwfpnyh9fveyh3hs)
+- [XMR sponsor](https://xmrchain.net/search?value=89XCyahmZiQgcVwjrSZTcJepPqCxZgMqwbABvzPKVpzC7gi8URDme8H6UThpCqX69y5i1aA81AKq57Wynjovy7g4K9MeY5c)
+- [FIAT sponsor](https://checkout.revolut.com/pay/1122870b-1836-42e7-942b-90a99ef5e457)
 
 ## Roadmap
 
