@@ -106,7 +106,7 @@ Submit a PR or donate and I will do it for you.
 
 - **Star the repo**
 - **Tell your friends**
-- XMR support [**9XCyahmZiQgcVwjrSZTcJepPqCxZgMqwbABvzPKVpzC7gi8URDme8H6UThpCqX69y5i1aA81AKq57Wynjovy7g4K9MeY5c**]
+- XMR support [**89XCyahmZiQgcVwjrSZTcJepPqCxZgMqwbABvzPKVpzC7gi8URDme8H6UThpCqX69y5i1aA81AKq57Wynjovy7g4K9MeY5c**]
 - BTC support [**bc1qzaqeqwklaq86uz8h2lww87qwfpnyh9fveyh3hs**]
 - [GitHub sponsor](https://github.com/sponsors/lfaoro)
 - [FIAT support](https://checkout.revolut.com/pay/7c8fae59-f65b-44de-9875-39dc014dc817)
