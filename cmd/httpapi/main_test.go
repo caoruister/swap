@@ -131,6 +131,23 @@ func TestZeroXTokenAddress(t *testing.T) {
 	}
 }
 
+func TestZeroXTokenAddress_PolygonETHUsesWETH(t *testing.T) {
+	addr, err := zeroXTokenAddress("137", "ETH")
+	if err != nil {
+		t.Fatalf("zeroXTokenAddress(137, ETH) unexpected error: %v", err)
+	}
+
+	const polygonWETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+	const polygonNativeMATIC = "0x0000000000000000000000000000000000001010"
+
+	if addr != polygonWETH {
+		t.Fatalf("polygon ETH mapping = %q, want WETH %q", addr, polygonWETH)
+	}
+	if addr == polygonNativeMATIC {
+		t.Fatalf("polygon ETH mapping should not use native MATIC placeholder %q", polygonNativeMATIC)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ZeroXQuoteProvider integration-style tests using a mock HTTP server
 // ---------------------------------------------------------------------------

@@ -809,7 +809,8 @@ func zeroXTokenAddress(chainId, symbol string) (string, error) {
 	case "137":
 		switch symbol {
 		case "ETH":
-			return "0x0000000000000000000000000000000000001010", nil
+			// Polygon: use WETH token address for ETH swaps (not native MATIC 0x...1010).
+			return "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", nil
 		case "USDC":
 			return "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", nil
 		case "DAI":
