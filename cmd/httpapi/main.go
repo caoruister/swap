@@ -246,7 +246,7 @@ func getCoins(ctx context.Context) ([]Coin, error) {
 	}
 
 	if source == "static" {
-		return cloneCoins(coins), nil
+		return filterCoinsForActiveProviders(cloneCoins(coins)), nil
 	}
 
 	now := time.Now()
@@ -281,7 +281,7 @@ func getCoins(ctx context.Context) ([]Coin, error) {
 	coinsCache.expiresAt = now.Add(ttl)
 	coinsCache.Unlock()
 
-	return fresh, nil
+	return filterCoinsForActiveProviders(fresh), nil
 }
 
 func fetchCoinsFromCoinGecko(ctx context.Context) ([]Coin, error) {
@@ -339,6 +339,9 @@ func fetchCoinsFromCoinGecko(ctx context.Context) ([]Coin, error) {
 		if _, ok := seen[ticker]; ok {
 			continue
 		}
+		if !isTickerSupportedByActiveProviders(ticker) {
+			continue
+		}
 		seen[ticker] = struct{}{}
 		out = append(out, Coin{
 			Name:    name,
@@ -360,6 +363,67 @@ func cloneCoins(src []Coin) []Coin {
 	out := make([]Coin, len(src))
 	copy(out, src)
 	return out
+}
+
+func filterCoinsForActiveProviders(src []Coin) []Coin {
+	out := make([]Coin, 0, len(src))
+	for _, c := range src {
+		if isTickerSupportedByActiveProviders(c.Ticker) {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		// Never return an empty list; fallback to original source list.
+		return src
+	}
+	return out
+}
+
+func isTickerSupportedByActiveProviders(ticker string) bool {
+	ticker = strings.ToUpper(strings.TrimSpace(ticker))
+	if ticker == "" {
+		return false
+	}
+
+	names := parseProviderList(strings.TrimSpace(os.Getenv("SWAP_QUOTE_PROVIDER")))
+	if len(names) == 0 {
+		return true
+	}
+
+	chain0x := strings.TrimSpace(os.Getenv("SWAP_0X_CHAIN_ID"))
+	if chain0x == "" {
+		chain0x = defaultZeroXChainID
+	}
+	chain1inch := strings.TrimSpace(os.Getenv("SWAP_1INCH_CHAIN_ID"))
+	if chain1inch == "" {
+		chain1inch = "1"
+	}
+
+	for _, name := range names {
+		switch name {
+		case "0x", "zerox", "0x_public", "0x-public":
+			if _, err := zeroXTokenAddress(chain0x, normalizeQuoteSymbol(ticker)); err == nil {
+				return true
+			}
+		case "1inch", "oneinch", "1inch_public", "1inch-public":
+			if _, err := oneInchTokenAddress(chain1inch, normalizeQuoteSymbol(ticker)); err == nil {
+				return true
+			}
+		case "mock", "none", "external", "generic", "simple":
+			// Non-onchain providers may support arbitrary symbols.
+			return true
+		}
+	}
+
+	return false
+}
+
+func normalizeQuoteSymbol(symbol string) string {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "BTC" {
+		return "WBTC"
+	}
+	return symbol
 }
 
 func swapRateHandler(w http.ResponseWriter, r *http.Request) {
@@ -824,11 +888,14 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, fmt.Errorf("1inch public API requires amount_from")
 	}
 
-	fromToken := strings.ToUpper(req.TickerFrom)
-	toToken := strings.ToUpper(req.TickerTo)
+	fromToken := normalizeQuoteSymbol(req.TickerFrom)
+	toToken := normalizeQuoteSymbol(req.TickerTo)
 	chainId := os.Getenv("SWAP_1INCH_CHAIN_ID")
 	if chainId == "" {
 		chainId = "1"
+	}
+	if req.ChainID != "" {
+		chainId = req.ChainID
 	}
 
 	fromAddr, err := oneInchTokenAddress(chainId, fromToken)
@@ -903,8 +970,8 @@ func (p *ZeroXQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest)
 		return nil, fmt.Errorf("0x API requires amount_from")
 	}
 
-	fromSym := strings.ToUpper(req.TickerFrom)
-	toSym := strings.ToUpper(req.TickerTo)
+	fromSym := normalizeQuoteSymbol(req.TickerFrom)
+	toSym := normalizeQuoteSymbol(req.TickerTo)
 
 	chainID := p.chainID
 	if req.ChainID != "" {
@@ -924,6 +991,7 @@ func (p *ZeroXQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest)
 		"DAI":  18,
 		"USDC": 6,
 		"USDT": 6,
+		"BTC":  8,
 		"WBTC": 8,
 	}
 	dec := 18
@@ -1086,6 +1154,8 @@ func zeroXTokenAddress(chainId, symbol string) (string, error) {
 		case "ETH":
 			// Polygon: use WETH token address for ETH swaps (not native MATIC 0x...1010).
 			return "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", nil
+		case "WBTC":
+			return "0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6", nil
 		case "USDC":
 			return "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", nil
 		case "DAI":
