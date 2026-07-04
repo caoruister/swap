@@ -24,6 +24,10 @@
 !cmd
 !cmd/swap
 !cmd/swap/**
+!cmd/httpapi
+!cmd/httpapi/**
+
+!test.http
 
 !pkg
 !pkg/**

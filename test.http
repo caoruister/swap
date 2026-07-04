@@ -1,0 +1,165 @@
+### HTTP API Setup
+# Start the service with 0x provider settings before running these requests.
+# Example:
+# SWAP_QUOTE_PROVIDER=0x \
+#   SWAP_0X_API_KEY=your_key_here \
+#   SWAP_0X_CHAIN_ID=1 \
+#   SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
+#   go run ./cmd/httpapi
+# Optional: include "chain_id" in request body to override SWAP_0X_CHAIN_ID for 0x.
+# Optional: include "taker" in request body to override the configured SWAP_0X_TAKER for Permit2 quotes.
+# Supported 0x chain IDs: 1, 10, 137, 42161, 56
+# Supported token symbols: ETH, USDC, DAI, WBTC, USDT
+
+### ETH -> USDC
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1"
+  ,"chain_id": "1"
+}
+
+### ETH -> DAI
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "DAI",
+  "amount_from": "0.1"
+  ,"chain_id": "1"
+}
+
+### USDC -> USDT
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "USDC",
+  "ticker_to": "USDT",
+  "amount_from": "100"
+}
+
+### Example with explicit `taker`
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "1",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+
+### Per-chain quick tests
+
+### Chain 1 (Ethereum)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "1",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 10 (Optimism)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "10",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 137 (Polygon)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "137",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 42161 (Arbitrum)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "42161",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 56 (BSC)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "56",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 1 ETH -> USDC
+# Start service with SWAP_0X_CHAIN_ID=1
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1"
+  ,"chain_id": "137"
+}
+
+### Chain 1 ETH -> DAI
+# Start service with SWAP_0X_CHAIN_ID=1
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "DAI",
+  "amount_from": "0.1"
+}
+
+### Chain 137 ETH -> USDC
+# Start service with SWAP_0X_CHAIN_ID=137
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1"
+}
+
+### Chain 137 USDC -> DAI
+# Start service with SWAP_0X_CHAIN_ID=137
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "USDC",
+  "ticker_to": "DAI",
+  "amount_from": "100"
+  ,"chain_id": "137"
+}

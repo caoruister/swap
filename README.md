@@ -72,6 +72,41 @@ git clone https://github.com/lfaoro/swap.git \
   && bin/swap
 ```
 
+## HTTP API Environment Variables
+
+The `swap` backend supports a local HTTP API for quote providers. When using the 0x provider, set the following variables:
+
+- `SWAP_QUOTE_PROVIDER=0x` — enable 0x as the quote provider.
+- `SWAP_0X_API_KEY=<your-0x-api-key>` — required for 0x Permit2 quote endpoints.
+- `SWAP_0X_CHAIN_ID=1|10|137|42161|56` — supported chain IDs. Default is `1`.
+  - `1` → Ethereum Mainnet
+  - `10` → Optimism
+  - `137` → Polygon
+  - `42161` → Arbitrum One
+  - `56` → Binance Smart Chain (BSC)
+- `SWAP_0X_TAKER=0x...` — valid Ethereum address for Permit2 quotes.
+  - Default: `0x0000000000000000000000000000000000010000`
+- `chain_id` — optional request body field for `/v1/swaprate` that overrides `SWAP_0X_CHAIN_ID` when using 0x.
+- `taker` — optional request body field for `/v1/swaprate` to override the `SWAP_0X_TAKER` address for Permit2 quotes. Must be a valid 0x-style address (0x... with 40 hex chars).
+
+Supported token symbols for on-chain quote requests:
+
+- `ETH`
+- `USDC`
+- `DAI`
+- `WBTC`
+- `USDT`
+
+Example:
+
+```bash
+SWAP_QUOTE_PROVIDER=0x \
+  SWAP_0X_API_KEY=your_key_here \
+  SWAP_0X_CHAIN_ID=1 \
+  SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
+  go run ./cmd/httpapi
+```
+
 ## Storage
 
 - GNU/Linux / MacOS `$HOME/.config/swap/config`
