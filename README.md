@@ -78,16 +78,22 @@ The `swap` backend supports a local HTTP API for quote providers. When using the
 
 - `SWAP_QUOTE_PROVIDER=0x` — enable 0x as the quote provider.
 - `SWAP_0X_API_KEY=<your-0x-api-key>` — required for 0x Permit2 quote endpoints.
-- `SWAP_0X_CHAIN_ID=1|10|137|42161|56` — supported chain IDs. Default is `1`.
+- `SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114` — supported chain IDs. Default is `1`.
   - `1` → Ethereum Mainnet
   - `10` → Optimism
   - `137` → Polygon
   - `42161` → Arbitrum One
   - `56` → Binance Smart Chain (BSC)
+  - `8453` → Base
+  - `43114` → Avalanche C-Chain
 - `SWAP_0X_TAKER=0x...` — valid Ethereum address for Permit2 quotes.
   - Default: `0x0000000000000000000000000000000000010000`
 - `chain_id` — optional request body field for `/v1/swaprate` that overrides `SWAP_0X_CHAIN_ID` when using 0x.
 - `taker` — optional request body field for `/v1/swaprate` to override the `SWAP_0X_TAKER` address for Permit2 quotes. Must be a valid 0x-style address (0x... with 40 hex chars).
+
+Polygon mapping note:
+
+- On Polygon (`chain_id=137`), ticker `ETH` is mapped to Polygon WETH token (`0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619`) for quoting.
 
 Supported token symbols for on-chain quote requests:
 

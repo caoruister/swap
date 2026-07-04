@@ -10,6 +10,7 @@
 # Optional: include "taker" in request body to override the configured SWAP_0X_TAKER for Permit2 quotes.
 # Supported 0x chain IDs: 1, 10, 137, 42161, 56, 8453 (Base), 43114 (Avalanche)
 # Supported token symbols: ETH, USDC, DAI, WBTC, USDT
+# Note: on Polygon (137), ticker ETH is mapped to Polygon WETH token address.
 
 ### ETH -> USDC
 POST http://127.0.0.1:8081/v1/swaprate
@@ -83,6 +84,7 @@ Content-Type: application/json
 }
 
 ### Chain 137 (Polygon)
+# Polygon note: ETH ticker maps to WETH (0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619).
 POST http://127.0.0.1:8081/v1/swaprate
 Content-Type: application/json
 
@@ -151,7 +153,7 @@ Content-Type: application/json
   "ticker_from": "ETH",
   "ticker_to": "USDC",
   "amount_from": "0.1"
-  ,"chain_id": "137"
+  ,"chain_id": "1"
 }
 
 ### Chain 1 ETH -> DAI
