@@ -74,9 +74,10 @@ git clone https://github.com/lfaoro/swap.git \
 
 ## HTTP API Environment Variables
 
-The `swap` backend supports a local HTTP API for quote providers. When using the 0x provider, set the following variables:
+The `swap` backend supports a local HTTP API for quote providers. You can run a single provider or aggregate multiple providers concurrently (e.g. `0x,1inch`).
 
-- `SWAP_QUOTE_PROVIDER=0x` — enable 0x as the quote provider.
+- `SWAP_QUOTE_PROVIDER=0x` — single provider mode (0x only).
+- `SWAP_QUOTE_PROVIDER=0x,1inch` — multi-provider aggregation mode (also supports `0x+1inch`, `0x;1inch`, or space-separated values).
 - `SWAP_0X_API_KEY=<your-0x-api-key>` — required for 0x Permit2 quote endpoints.
 - `SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114` — supported chain IDs. Default is `1`.
   - `1` → Ethereum Mainnet
@@ -107,6 +108,16 @@ Example:
 
 ```bash
 SWAP_QUOTE_PROVIDER=0x \
+  SWAP_0X_API_KEY=your_key_here \
+  SWAP_0X_CHAIN_ID=1 \
+  SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
+  go run ./cmd/httpapi
+```
+
+Multi-provider aggregation example:
+
+```bash
+SWAP_QUOTE_PROVIDER=0x,1inch \
   SWAP_0X_API_KEY=your_key_here \
   SWAP_0X_CHAIN_ID=1 \
   SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \

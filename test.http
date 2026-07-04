@@ -47,6 +47,23 @@ Content-Type: application/json
 ### Example with explicit `taker`
 POST http://127.0.0.1:8081/v1/swaprate
 Content-Type: application/json
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "1",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Aggregated quotes (0x + 1inch)
+# Start service with:
+# SWAP_QUOTE_PROVIDER=0x,1inch \
+#   SWAP_0X_API_KEY=your_key_here \
+#   SWAP_0X_CHAIN_ID=1 \
+#   SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
+#   go run ./cmd/httpapi
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
 
 {
   "ticker_from": "ETH",
