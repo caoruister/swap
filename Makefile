@@ -9,6 +9,19 @@ build:
 	@go mod tidy
 	CGO_ENABLED=0 go build ${FLAGS} ${LDFLAGS} -o ./bin/ ./cmd/swap
 
+build-api:
+	CGO_ENABLED=0 go build ${FLAGS} ${LDFLAGS} -o ./bin/httpapi ./cmd/httpapi
+
+run-api:
+	SWAP_QUOTE_PROVIDER=0x \
+	SWAP_0X_API_KEY=$(SWAP_0X_API_KEY) \
+	SWAP_0X_CHAIN_ID=$(or $(SWAP_0X_CHAIN_ID),1) \
+	SWAP_0X_TAKER=$(or $(SWAP_0X_TAKER),0x0000000000000000000000000000000000010000) \
+	go run ./cmd/httpapi
+
+test-api:
+	go test ./cmd/httpapi/ -v -count=1
+
 pre: audit
 	go mod tidy
 	go fmt ./... && go vet ./...

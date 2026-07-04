@@ -185,11 +185,14 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		"Optional 0x provider environment variables:\n" +
 		"  SWAP_QUOTE_PROVIDER=0x\n" +
 		"  SWAP_0X_API_KEY=<your-0x-api-key>\n" +
-		"  SWAP_0X_CHAIN_ID=1|10|137|42161|56 (default is 1)\n" +
+		"  SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114 (default is 1)\n" +
+		"    1=Ethereum  10=Optimism  137=Polygon  42161=Arbitrum\n" +
+		"    56=BSC  8453=Base  43114=Avalanche\n" +
 		"  SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 (default valid Permit2 taker)\n" +
-		"Request body field:\n" +
-		"  chain_id — optional chain override for /v1/swaprate when using 0x.\n" +
-		"Supported tokens: ETH, USDC, DAI, WBTC (chain-specific mapping)"))
+		"Request body fields (override per-request):\n" +
+		"  chain_id — chain override for /v1/swaprate when using 0x.\n" +
+		"  taker   — Permit2 taker address override.\n" +
+		"Supported tokens: ETH, USDC, DAI, WBTC, USDT (chain-specific mapping)"))
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
