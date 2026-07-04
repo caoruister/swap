@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -145,6 +147,112 @@ func TestZeroXTokenAddress_PolygonETHUsesWETH(t *testing.T) {
 	}
 	if addr == polygonNativeMATIC {
 		t.Fatalf("polygon ETH mapping should not use native MATIC placeholder %q", polygonNativeMATIC)
+	}
+}
+
+type stubQuoteProvider struct {
+	delay  time.Duration
+	quotes []Quote
+	err    error
+}
+
+func (s stubQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
+	if s.delay > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(s.delay):
+		}
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.quotes, nil
+}
+
+func TestParseProviderList(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "comma", raw: "0x,1inch", want: []string{"0x", "1inch"}},
+		{name: "plus", raw: "0x+1inch", want: []string{"0x", "1inch"}},
+		{name: "space and duplicate", raw: "0x 1inch 0x", want: []string{"0x", "1inch"}},
+		{name: "empty becomes mock", raw: "", want: []string{"mock"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseProviderList(tt.raw)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseProviderList(%q) len=%d want=%d; got=%v", tt.raw, len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("parseProviderList(%q)[%d]=%q want=%q", tt.raw, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestMultiQuoteProvider_AggregatesSortsAndToleratesFailure(t *testing.T) {
+	mp := &MultiQuoteProvider{providers: []namedQuoteProvider{
+		{
+			name: "0x",
+			provider: stubQuoteProvider{
+				delay: 50 * time.Millisecond,
+				quotes: []Quote{
+					{Provider: "0x", AmountTo: "200"},
+				},
+			},
+		},
+		{
+			name: "1inch",
+			provider: stubQuoteProvider{
+				delay: 50 * time.Millisecond,
+				quotes: []Quote{
+					{Provider: "1inch", AmountTo: "300"},
+				},
+			},
+		},
+		{
+			name:     "bad",
+			provider: stubQuoteProvider{delay: 10 * time.Millisecond, err: errors.New("boom")},
+		},
+	}}
+
+	start := time.Now()
+	quotes, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 2 {
+		t.Fatalf("GetQuotes returned %d quotes, want 2", len(quotes))
+	}
+	if quotes[0].AmountTo != "300" || quotes[0].Provider != "1inch" {
+		t.Fatalf("best quote ordering mismatch: first=%+v", quotes[0])
+	}
+	if quotes[1].AmountTo != "200" || quotes[1].Provider != "0x" {
+		t.Fatalf("second quote ordering mismatch: second=%+v", quotes[1])
+	}
+	if elapsed >= 90*time.Millisecond {
+		t.Fatalf("providers likely not running concurrently; elapsed=%s", elapsed)
+	}
+}
+
+func TestMultiQuoteProvider_AllFail(t *testing.T) {
+	mp := &MultiQuoteProvider{providers: []namedQuoteProvider{
+		{name: "0x", provider: stubQuoteProvider{err: errors.New("0x down")}},
+		{name: "1inch", provider: stubQuoteProvider{err: errors.New("1inch down")}},
+	}}
+
+	quotes, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
+	if err == nil {
+		t.Fatalf("expected error when all providers fail, got nil with quotes=%v", quotes)
 	}
 }
 

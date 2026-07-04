@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,6 +129,15 @@ type ZeroXQuoteProvider struct {
 	taker   string
 }
 
+type namedQuoteProvider struct {
+	name     string
+	provider QuoteProvider
+}
+
+type MultiQuoteProvider struct {
+	providers []namedQuoteProvider
+}
+
 const (
 	defaultZeroXChainID = "1"
 	defaultZeroXTaker   = "0x0000000000000000000000000000000000010000"
@@ -184,6 +194,7 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		"Use /v1/coins, /v1/swaprate, /v1/swaptrade, /v1/swapstatus/stream.\n" +
 		"Optional 0x provider environment variables:\n" +
 		"  SWAP_QUOTE_PROVIDER=0x\n" +
+		"    or multi-provider mode: SWAP_QUOTE_PROVIDER=0x,1inch (also supports 0x+1inch)\n" +
 		"  SWAP_0X_API_KEY=<your-0x-api-key>\n" +
 		"  SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114 (default is 1)\n" +
 		"    1=Ethereum  10=Optimism  137=Polygon  42161=Arbitrum\n" +
@@ -400,19 +411,79 @@ func coinName(ticker string) string {
 }
 
 func newQuoteProvider() QuoteProvider {
-	provider := strings.ToLower(strings.TrimSpace(os.Getenv("SWAP_QUOTE_PROVIDER")))
-	switch provider {
+	raw := strings.TrimSpace(os.Getenv("SWAP_QUOTE_PROVIDER"))
+	names := parseProviderList(raw)
+	if len(names) == 0 {
+		return MockQuoteProvider{}
+	}
+
+	resolved := make([]namedQuoteProvider, 0, len(names))
+	for _, name := range names {
+		p, ok := buildProviderByName(name)
+		if !ok {
+			log.Printf("unknown provider %q in SWAP_QUOTE_PROVIDER=%q; skipping", name, raw)
+			continue
+		}
+		resolved = append(resolved, namedQuoteProvider{name: name, provider: p})
+	}
+
+	if len(resolved) == 0 {
+		log.Printf("no valid provider in SWAP_QUOTE_PROVIDER=%q; using mock provider", raw)
+		return MockQuoteProvider{}
+	}
+	if len(resolved) == 1 {
+		return resolved[0].provider
+	}
+
+	log.Printf("using multi provider aggregation: %v", names)
+	return &MultiQuoteProvider{providers: resolved}
+}
+
+func parseProviderList(raw string) []string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" || raw == "none" || raw == "mock" {
+		return []string{"mock"}
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', '+', ';', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(parts) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func buildProviderByName(name string) (QuoteProvider, bool) {
+	switch name {
 	case "1inch", "oneinch", "1inch_public", "1inch-public":
-		return newOneInchQuoteProvider()
+		return newOneInchQuoteProvider(), true
 	case "0x", "zerox", "0x_public", "0x-public":
-		return newZeroXQuoteProvider()
+		return newZeroXQuoteProvider(), true
 	case "external", "generic", "simple":
-		return newExternalQuoteProvider()
-	case "mock", "", "none":
-		return MockQuoteProvider{}
+		return newExternalQuoteProvider(), true
+	case "mock", "none":
+		return MockQuoteProvider{}, true
 	default:
-		log.Printf("unknown SWAP_QUOTE_PROVIDER=%q; using mock provider", provider)
-		return MockQuoteProvider{}
+		return nil, false
 	}
 }
 
@@ -486,6 +557,72 @@ func newZeroXQuoteProvider() QuoteProvider {
 
 func (MockQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
 	return []Quote{buildQuote(req)}, nil
+}
+
+func (p *MultiQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
+	type result struct {
+		provider string
+		quotes   []Quote
+		err      error
+	}
+
+	results := make(chan result, len(p.providers))
+	var wg sync.WaitGroup
+	for _, np := range p.providers {
+		np := np
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			quotes, err := np.provider.GetQuotes(ctx, req)
+			results <- result{provider: np.name, quotes: quotes, err: err}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	agg := make([]Quote, 0)
+	errMsgs := make([]string, 0)
+	for r := range results {
+		if r.err != nil {
+			errMsgs = append(errMsgs, fmt.Sprintf("%s: %v", r.provider, r.err))
+			continue
+		}
+		agg = append(agg, r.quotes...)
+	}
+
+	if len(agg) == 0 {
+		if len(errMsgs) == 0 {
+			return nil, fmt.Errorf("all quote providers returned no quotes")
+		}
+		return nil, fmt.Errorf("all quote providers failed: %s", strings.Join(errMsgs, " | "))
+	}
+
+	sortQuotesByBestAmount(agg)
+	if len(errMsgs) > 0 {
+		log.Printf("multi provider partial failures: %s", strings.Join(errMsgs, " | "))
+	}
+	return agg, nil
+}
+
+func sortQuotesByBestAmount(quotes []Quote) {
+	sort.SliceStable(quotes, func(i, j int) bool {
+		a, aok := new(big.Int).SetString(strings.TrimSpace(quotes[i].AmountTo), 10)
+		b, bok := new(big.Int).SetString(strings.TrimSpace(quotes[j].AmountTo), 10)
+		if aok && bok {
+			return a.Cmp(b) > 0
+		}
+		if aok {
+			return true
+		}
+		if bok {
+			return false
+		}
+		// Fallback for non-integer/unknown formats.
+		return strings.TrimSpace(quotes[i].AmountTo) > strings.TrimSpace(quotes[j].AmountTo)
+	})
 }
 
 func (p *ExternalQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
