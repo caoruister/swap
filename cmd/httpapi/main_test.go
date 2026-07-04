@@ -21,7 +21,7 @@ func TestIsValidEthAddress(t *testing.T) {
 		{"0x0000000000000000000000000000000000010000", true},
 		{"0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", true},
 		{"0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", true},
-		{"0x123", false},                  // too short
+		{"0x123", false}, // too short
 		{"A0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", false}, // no 0x prefix
 		{"0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG", false}, // non-hex
 		{"", false},
@@ -70,6 +70,8 @@ func TestWrappedETHAddress(t *testing.T) {
 	}{
 		{"42161", true},  // Arbitrum
 		{"56", true},     // BSC
+		{"8453", true},   // Base
+		{"43114", true},  // Avalanche
 		{"1", false},     // Ethereum – native placeholder is fine, no WETH override
 		{"10", false},    // Optimism
 		{"137", false},   // Polygon
@@ -104,6 +106,10 @@ func TestZeroXTokenAddress(t *testing.T) {
 		{"42161", "USDC", false},
 		{"56", "ETH", false},
 		{"56", "USDC", false},
+		{"8453", "ETH", false},
+		{"8453", "USDC", false},
+		{"43114", "ETH", false},
+		{"43114", "USDC", false},
 		// unknown token
 		{"1", "UNKNOWN", true},
 		// unsupported chain
@@ -340,6 +346,78 @@ func TestZeroXGetQuotes_WETHFallback_BSC(t *testing.T) {
 	}
 	if secondSellToken != wethBSC {
 		t.Errorf("retry used sellToken=%q, want WETH=%q", secondSellToken, wethBSC)
+	}
+}
+
+// TestZeroXGetQuotes_WETHFallback_Base verifies WETH fallback on Base (8453).
+func TestZeroXGetQuotes_WETHFallback_Base(t *testing.T) {
+	const wethBase = "0x4200000000000000000000000000000000000006"
+	attempt := 0
+	var secondSellToken string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"validationErrors":[{"field":"sellToken","reason":"Invalid ethereum address"}]}`))
+			return
+		}
+		secondSellToken = r.URL.Query().Get("sellToken")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mockZeroXResponse{BuyAmount: "400000000", SellAmount: "100000000000000000", Gas: 0})
+	}))
+	defer srv.Close()
+
+	p := newZeroXProvider(srv.URL, "8453")
+	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "0.1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes after WETH fallback on Base: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempt)
+	}
+	if secondSellToken != wethBase {
+		t.Errorf("retry used sellToken=%q, want WETH=%q", secondSellToken, wethBase)
+	}
+}
+
+// TestZeroXGetQuotes_WETHFallback_Avalanche verifies WETH fallback on Avalanche (43114).
+func TestZeroXGetQuotes_WETHFallback_Avalanche(t *testing.T) {
+	const wethAvax = "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB"
+	attempt := 0
+	var secondSellToken string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"validationErrors":[{"field":"sellToken","reason":"Invalid ethereum address"}]}`))
+			return
+		}
+		secondSellToken = r.URL.Query().Get("sellToken")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(mockZeroXResponse{BuyAmount: "600000000", SellAmount: "100000000000000000", Gas: 0})
+	}))
+	defer srv.Close()
+
+	p := newZeroXProvider(srv.URL, "43114")
+	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "0.1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes after WETH fallback on Avalanche: %v", err)
+	}
+	if attempt != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempt)
+	}
+	if secondSellToken != wethAvax {
+		t.Errorf("retry used sellToken=%q, want WETH=%q", secondSellToken, wethAvax)
 	}
 }
 

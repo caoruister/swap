@@ -8,7 +8,7 @@
 #   go run ./cmd/httpapi
 # Optional: include "chain_id" in request body to override SWAP_0X_CHAIN_ID for 0x.
 # Optional: include "taker" in request body to override the configured SWAP_0X_TAKER for Permit2 quotes.
-# Supported 0x chain IDs: 1, 10, 137, 42161, 56
+# Supported 0x chain IDs: 1, 10, 137, 42161, 56, 8453 (Base), 43114 (Avalanche)
 # Supported token symbols: ETH, USDC, DAI, WBTC, USDT
 
 ### ETH -> USDC
@@ -115,6 +115,30 @@ Content-Type: application/json
   "ticker_to": "USDC",
   "amount_from": "0.1",
   "chain_id": "56",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 8453 (Base)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "8453",
+  "taker": "0x0000000000000000000000000000000000010000"
+}
+
+### Chain 43114 (Avalanche C-Chain)
+POST http://127.0.0.1:8081/v1/swaprate
+Content-Type: application/json
+
+{
+  "ticker_from": "ETH",
+  "ticker_to": "USDC",
+  "amount_from": "0.1",
+  "chain_id": "43114",
   "taker": "0x0000000000000000000000000000000000010000"
 }
 

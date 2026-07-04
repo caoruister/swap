@@ -139,6 +139,8 @@ var supportedZeroXChains = map[string]struct{}{
 	"137":   {},
 	"42161": {},
 	"56":    {},
+	"8453":  {}, // Base
+	"43114": {}, // Avalanche C-Chain
 }
 
 var (
@@ -840,6 +842,33 @@ func zeroXTokenAddress(chainId, symbol string) (string, error) {
 		default:
 			return "", fmt.Errorf("unsupported token %s on chain %s", symbol, chainId)
 		}
+	case "8453": // Base
+		switch symbol {
+		case "ETH":
+			return "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", nil
+		case "USDC":
+			return "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", nil
+		case "DAI":
+			return "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb", nil
+		case "USDT":
+			return "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", nil
+		default:
+			return "", fmt.Errorf("unsupported token %s on chain %s", symbol, chainId)
+		}
+	case "43114": // Avalanche C-Chain
+		switch symbol {
+		case "ETH":
+			// Avalanche has no native ETH; use Wrapped Ether (WETH.e) bridged via Avalanche Bridge
+			return "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB", nil
+		case "USDC":
+			return "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", nil
+		case "DAI":
+			return "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70", nil
+		case "USDT":
+			return "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7", nil
+		default:
+			return "", fmt.Errorf("unsupported token %s on chain %s", symbol, chainId)
+		}
 	default:
 		return "", fmt.Errorf("unsupported chain id %s", chainId)
 	}
@@ -853,8 +882,14 @@ func wrappedETHAddress(chainId string) (string, bool) {
 		// Arbitrum WETH
 		return "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", true
 	case "56":
-		// BSC wrapped/peg-ETH (Binance-Peg Ethereum Token)
+		// BSC: Binance-Peg Ethereum Token
 		return "0x2170Ed0880ac9A755fd29B2688956BD959F933F8", true
+	case "8453":
+		// Base WETH
+		return "0x4200000000000000000000000000000000000006", true
+	case "43114":
+		// Avalanche: WETH.e (bridged via Avalanche Bridge)
+		return "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB", true
 	default:
 		return "", false
 	}
