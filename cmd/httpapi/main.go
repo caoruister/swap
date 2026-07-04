@@ -209,6 +209,10 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 		"Request body fields (override per-request):\n" +
 		"  chain_id — chain override for /v1/swaprate when using 0x.\n" +
 		"  taker   — Permit2 taker address override.\n" +
+		"/v1/coins dynamic source variables:\n" +
+		"  SWAP_COINS_SOURCE=coingecko|static (default coingecko)\n" +
+		"  SWAP_COINS_LIMIT=1..250 (default 100)\n" +
+		"  SWAP_COINS_CACHE_TTL=<duration> (default 10m)\n" +
 		"Supported tokens: ETH, USDC, DAI, WBTC, USDT (chain-specific mapping)"))
 }
 

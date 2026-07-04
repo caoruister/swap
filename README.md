@@ -89,6 +89,13 @@ The `swap` backend supports a local HTTP API for quote providers. You can run a 
   - `43114` → Avalanche C-Chain
 - `SWAP_0X_TAKER=0x...` — valid Ethereum address for Permit2 quotes.
   - Default: `0x0000000000000000000000000000000000010000`
+- `SWAP_COINS_SOURCE=coingecko|static` — source for `/v1/coins`.
+  - Default: `coingecko` (dynamic list fetched from CoinGecko)
+  - `static` uses the built-in fallback list
+- `SWAP_COINS_LIMIT=1..250` — number of coins fetched from CoinGecko.
+  - Default: `100`
+- `SWAP_COINS_CACHE_TTL=<duration>` — in-memory cache TTL for coin list.
+  - Default: `10m` (examples: `30s`, `5m`, `1h`)
 - `chain_id` — optional request body field for `/v1/swaprate` that overrides `SWAP_0X_CHAIN_ID` when using 0x.
 - `taker` — optional request body field for `/v1/swaprate` to override the `SWAP_0X_TAKER` address for Permit2 quotes. Must be a valid 0x-style address (0x... with 40 hex chars).
 
@@ -111,6 +118,9 @@ SWAP_QUOTE_PROVIDER=0x \
   SWAP_0X_API_KEY=your_key_here \
   SWAP_0X_CHAIN_ID=1 \
   SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
+  SWAP_COINS_SOURCE=coingecko \
+  SWAP_COINS_LIMIT=100 \
+  SWAP_COINS_CACHE_TTL=10m \
   go run ./cmd/httpapi
 ```
 
