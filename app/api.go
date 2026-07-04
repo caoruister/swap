@@ -19,9 +19,9 @@ type SwapAPI struct {
 	cancel context.CancelFunc
 }
 
-func NewSwapAPI(client pb.CoinServiceClient) SwapAPI {
+func NewSwapAPI(client pb.CoinServiceClient) *SwapAPI {
 	ctx, cancel := context.WithCancel(context.Background())
-	return SwapAPI{c: client, ctx: ctx, cancel: cancel}
+	return &SwapAPI{c: client, ctx: ctx, cancel: cancel}
 }
 
 func (s *SwapAPI) Close() {
@@ -91,7 +91,7 @@ func (s SwapAPI) SwapRate(req SwapRateReqMsg) tea.Cmd {
 
 			return tea.Batch(
 				AddLog("api: error (SwapRate): %v", err),
-				AddError(fmt.Errorf(errMsg)),
+				AddError(fmt.Errorf("%s", errMsg)),
 			)()
 		}
 		return tea.Batch(

@@ -16,6 +16,11 @@ var BuildSHA string = "unset"
 var APIURL string = "api.swapcli.com:443"
 
 func main() {
+	// Allow overriding API URL from environment for testing (e.g. http://localhost:8081)
+	if v := os.Getenv("SWAP_API_URL"); v != "" {
+		APIURL = v
+	}
+
 	appcmd := &cli.Command{
 		Authors: []any{
 			map[string]string{

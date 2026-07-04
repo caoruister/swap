@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+    "strings"
 
 	"crypto/tls"
 
@@ -37,30 +38,36 @@ var mainCmd = func(c context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("not an interactive terminal :(")
 	}
 
-	var opts []grpc.DialOption
-	if APIURL == "localhost:8080" {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var apiClient app.APIClient
+	if strings.HasPrefix(APIURL, "http://") || strings.HasPrefix(APIURL, "https://") {
+		apiClient = app.NewHTTPSwapAPI(APIURL)
 	} else {
-		config := &tls.Config{
-			InsecureSkipVerify: false,
-			MinVersion:         tls.VersionTLS13,
+		var opts []grpc.DialOption
+		if APIURL == "localhost:8080" {
+			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		} else {
+			config := &tls.Config{
+				InsecureSkipVerify: false,
+				MinVersion:         tls.VersionTLS13,
+			}
+			opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(config)))
 		}
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(config)))
-	}
 
-	conn, err := grpc.NewClient(APIURL, opts...)
-	if err != nil {
-		return fmt.Errorf("failed to create connection: %w", err)
+		conn, err := grpc.NewClient(APIURL, opts...)
+		if err != nil {
+			return fmt.Errorf("failed to create connection: %w", err)
+		}
+		defer conn.Close()
+		client := pb.NewCoinServiceClient(conn)
+		apiClient = app.NewSwapAPI(client)
 	}
-	defer conn.Close()
-	client := pb.NewCoinServiceClient(conn)
 
 	cfg, err := app.NewConfig()
 	if err != nil {
 		return fmt.Errorf("failed to create config: %w", err)
 	}
 
-	m := app.NewTSwapUI(cfg, client, debug)
+	m := app.NewTSwapUI(cfg, apiClient, debug)
 	_, err = tea.NewProgram(m, tea.WithOutput(os.Stderr)).
 		Run()
 

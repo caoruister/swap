@@ -24,7 +24,7 @@ type SwapUI struct {
 	disable bool
 
 	state *AppState
-	api   SwapAPI
+	api   APIClient
 	cfg   *Config
 	cd    *CoinData
 
@@ -62,14 +62,14 @@ type CoinData struct {
 	Address textinput.Model
 }
 
-func NewTSwapUI(cfg *Config, client pb.CoinServiceClient, debug bool) *SwapUI {
+func NewTSwapUI(cfg *Config, api APIClient, debug bool) *SwapUI {
 	m := &SwapUI{
 		state: &AppState{},
-		api:   NewSwapAPI(client),
+		api:   api,
 		cfg:   cfg,
 		cd:    newCoinData(),
 
-		table: NewSwapTable(client),
+		table: NewSwapTable(api),
 
 		spinning: true,
 		sp:       spinner.New(spinner.WithSpinner(spinner.Dot)),
@@ -331,7 +331,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if m.cd.Address.Err != nil {
 				cmds = append(cmds, AddError(m.cd.Address.Err))
-				cmds = append(cmds, AddLog(m.cd.Address.Err.Error()))
+				cmds = append(cmds, AddLog("%s", m.cd.Address.Err.Error()))
 				m.cd.Address.Reset()
 				m.cd.Address.Err = nil
 				if msg.String() != "esc" {
@@ -354,7 +354,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 				if m.cd.Address.Err != nil {
 					cmds = append(cmds, AddError(m.cd.Address.Err))
-					cmds = append(cmds, AddLog(m.cd.Address.Err.Error()))
+					cmds = append(cmds, AddLog("%s", m.cd.Address.Err.Error()))
 					m.cd.Address.Reset()
 					m.cd.Address.Err = nil
 					if msg.String() != "esc" {
@@ -385,7 +385,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "ctrl+s":
 				if err := m.cfg.SaveAddress(m.cd.To.Ticker, m.cd.To.Network, m.cd.Address.Value()); err != nil {
-					cmds = append(cmds, AddLog(err.Error()))
+					cmds = append(cmds, AddLog("%s", err.Error()))
 					cmds = append(cmds, AddError(err))
 					return m, tea.Batch(cmds...)
 				}

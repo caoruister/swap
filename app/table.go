@@ -20,7 +20,7 @@ const (
 
 type SwapTable struct {
 	state TableState
-	api   SwapAPI
+	api   APIClient
 
 	coinTable     table.Model
 	coinTableRows []table.Row
@@ -32,7 +32,7 @@ type SwapTable struct {
 	payment bool
 }
 
-func NewSwapTable(client pb.CoinServiceClient) SwapTable {
+func NewSwapTable(api APIClient) SwapTable {
 	columns := []table.Column{
 		{Title: "Name", Width: 30},
 		{Title: "Ticker", Width: 7},
@@ -68,7 +68,7 @@ func NewSwapTable(client pb.CoinServiceClient) SwapTable {
 		coinTable: coinTable,
 		rateTable: rateTable,
 		state:     CoinTableState,
-		api:       NewSwapAPI(client),
+		api:       api,
 	}
 }
 
