@@ -209,32 +209,42 @@ func (h *HTTPSwapAPI) SwapStatus(req SwapStatusReqMsg) tea.Cmd {
         streamURL := h.url("/v1/swapstatus/stream") + "?tradeid=" + url.QueryEscape(req.TradeID)
         r, err := h.client.Get(streamURL)
         if err != nil {
-            return nil
+            return tea.Batch(
+                AddLog("http api: error (SwapStatus connect): %v", err),
+                AddError(err),
+            )()
         }
-        defer r.Body.Close()
 
         decoder := json.NewDecoder(r.Body)
-        for {
+
+        var recvCmd tea.Cmd
+        recvCmd = func() tea.Msg {
             var jr struct {
-                Status string `json:"status"`
-                TradeId string `json:"trade_id"`
-                Date string `json:"date"`
-                Provider string `json:"provider"`
-                Fixed bool `json:"fixed"`
-                Payment bool `json:"payment"`
-                TickerFrom string `json:"ticker_from"`
-                TickerTo string `json:"ticker_to"`
-                CoinFrom string `json:"coin_from"`
-                CoinTo string `json:"coin_to"`
-                NetworkFrom string `json:"network_from"`
-                NetworkTo string `json:"network_to"`
-                AmountFrom float64 `json:"amount_from"`
-                AmountTo float64 `json:"amount_to"`
-                AddressProvider string `json:"address_provider"`
-                AddressUser string `json:"address_user"`
+                Status          string  `json:"status"`
+                TradeId         string  `json:"trade_id"`
+                Date            string  `json:"date"`
+                Provider        string  `json:"provider"`
+                Fixed           bool    `json:"fixed"`
+                Payment         bool    `json:"payment"`
+                TickerFrom      string  `json:"ticker_from"`
+                TickerTo        string  `json:"ticker_to"`
+                CoinFrom        string  `json:"coin_from"`
+                CoinTo          string  `json:"coin_to"`
+                NetworkFrom     string  `json:"network_from"`
+                NetworkTo       string  `json:"network_to"`
+                AmountFrom      float64 `json:"amount_from"`
+                AmountTo        float64 `json:"amount_to"`
+                AddressProvider string  `json:"address_provider"`
+                AddressUser     string  `json:"address_user"`
             }
+
             if err := decoder.Decode(&jr); err != nil {
                 if err == io.EOF {
+                    _ = r.Body.Close()
+                    return nil
+                }
+                _ = r.Body.Close()
+                if h.ctx.Err() != nil {
                     return nil
                 }
                 return tea.Batch(
@@ -251,27 +261,32 @@ func (h *HTTPSwapAPI) SwapStatus(req SwapStatusReqMsg) tea.Cmd {
             }
 
             ev := &pb.SwapStatusResponse{
-                Status: jr.Status,
-                TradeId: jr.TradeId,
-                Date: ts,
-                Provider: jr.Provider,
-                Fixed: jr.Fixed,
-                Payment: jr.Payment,
-                TickerFrom: jr.TickerFrom,
-                TickerTo: jr.TickerTo,
-                CoinFrom: jr.CoinFrom,
-                CoinTo: jr.CoinTo,
-                NetworkFrom: jr.NetworkFrom,
-                NetworkTo: jr.NetworkTo,
-                AmountFrom: jr.AmountFrom,
-                AmountTo: jr.AmountTo,
+                Status:          jr.Status,
+                TradeId:         jr.TradeId,
+                Date:            ts,
+                Provider:        jr.Provider,
+                Fixed:           jr.Fixed,
+                Payment:         jr.Payment,
+                TickerFrom:      jr.TickerFrom,
+                TickerTo:        jr.TickerTo,
+                CoinFrom:        jr.CoinFrom,
+                CoinTo:          jr.CoinTo,
+                NetworkFrom:     jr.NetworkFrom,
+                NetworkTo:       jr.NetworkTo,
+                AmountFrom:      jr.AmountFrom,
+                AmountTo:        jr.AmountTo,
                 AddressProvider: jr.AddressProvider,
-                AddressUser: jr.AddressUser,
+                AddressUser:     jr.AddressUser,
             }
-            return func() tea.Msg {
-                return SwapStatusRespMsg{ev}
-            }()
+
+            return tea.Batch(
+                AddLog("http api: success (SwapStatus): %v", ev.GetStatus()),
+                func() tea.Msg { return SwapStatusRespMsg{ev} },
+                recvCmd,
+            )()
         }
+
+        return recvCmd()
     }
 }
 
