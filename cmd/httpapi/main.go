@@ -160,6 +160,12 @@ var (
 		{Name: "Monero", Ticker: "xmr", Network: "Mainnet", Minimum: 0.01, Maximum: 100000},
 		{Name: "Ethereum", Ticker: "eth", Network: "Mainnet", Minimum: 0.01, Maximum: 50000},
 	}
+	coinsClient = &http.Client{Timeout: 10 * time.Second}
+	coinsCache  = struct {
+		sync.RWMutex
+		data      []Coin
+		expiresAt time.Time
+	}{}
 	trades = struct {
 		sync.Mutex
 		data map[string]*tradeRecord
@@ -220,8 +226,136 @@ func coinsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	items, err := getCoins(r.Context())
+	if err != nil {
+		log.Printf("coins: dynamic source failed, fallback to static: %v", err)
+		items = cloneCoins(coins)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"coins": coins})
+	_ = json.NewEncoder(w).Encode(map[string]any{"coins": items})
+}
+
+func getCoins(ctx context.Context) ([]Coin, error) {
+	source := strings.ToLower(strings.TrimSpace(os.Getenv("SWAP_COINS_SOURCE")))
+	if source == "" {
+		source = "coingecko"
+	}
+
+	if source == "static" {
+		return cloneCoins(coins), nil
+	}
+
+	now := time.Now()
+	coinsCache.RLock()
+	if len(coinsCache.data) > 0 && now.Before(coinsCache.expiresAt) {
+		cached := cloneCoins(coinsCache.data)
+		coinsCache.RUnlock()
+		return cached, nil
+	}
+	coinsCache.RUnlock()
+
+	fresh, err := fetchCoinsFromCoinGecko(ctx)
+	if err != nil {
+		coinsCache.RLock()
+		stale := cloneCoins(coinsCache.data)
+		coinsCache.RUnlock()
+		if len(stale) > 0 {
+			return stale, nil
+		}
+		return nil, err
+	}
+
+	ttl := 10 * time.Minute
+	if v := strings.TrimSpace(os.Getenv("SWAP_COINS_CACHE_TTL")); v != "" {
+		if d, derr := time.ParseDuration(v); derr == nil && d > 0 {
+			ttl = d
+		}
+	}
+
+	coinsCache.Lock()
+	coinsCache.data = cloneCoins(fresh)
+	coinsCache.expiresAt = now.Add(ttl)
+	coinsCache.Unlock()
+
+	return fresh, nil
+}
+
+func fetchCoinsFromCoinGecko(ctx context.Context) ([]Coin, error) {
+	limit := 100
+	if raw := strings.TrimSpace(os.Getenv("SWAP_COINS_LIMIT")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			if n < 1 {
+				n = 1
+			}
+			if n > 250 {
+				n = 250
+			}
+			limit = n
+		}
+	}
+
+	u := fmt.Sprintf("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=%d&page=1&sparkline=false", limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "swap-http-backend/1.0")
+
+	resp, err := coinsClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("coingecko error %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	var payload []struct {
+		Symbol string `json:"symbol"`
+		Name   string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("coingecko returned empty coin list")
+	}
+
+	out := make([]Coin, 0, len(payload))
+	seen := make(map[string]struct{}, len(payload))
+	for _, it := range payload {
+		ticker := strings.ToLower(strings.TrimSpace(it.Symbol))
+		name := strings.TrimSpace(it.Name)
+		if ticker == "" || name == "" {
+			continue
+		}
+		if _, ok := seen[ticker]; ok {
+			continue
+		}
+		seen[ticker] = struct{}{}
+		out = append(out, Coin{
+			Name:    name,
+			Ticker:  ticker,
+			Network: "Mainnet",
+			Minimum: 0.00001,
+			Maximum: 100000,
+		})
+	}
+
+	if len(out) == 0 {
+		return nil, fmt.Errorf("coingecko returned no usable coins")
+	}
+
+	return out, nil
+}
+
+func cloneCoins(src []Coin) []Coin {
+	out := make([]Coin, len(src))
+	copy(out, src)
+	return out
 }
 
 func swapRateHandler(w http.ResponseWriter, r *http.Request) {
