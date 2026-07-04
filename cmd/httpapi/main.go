@@ -760,7 +760,7 @@ func (p *ZeroXQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest)
 // decimalToBaseUnits converts a decimal amount string (e.g. "0.1") to base units
 // for the given decimals (e.g. 18 -> wei). It returns an integer string.
 func decimalToBaseUnits(amount string, decimals int) (string, error) {
-	f, ok := new(big.Float).SetString(amount)
+	f, ok := new(big.Float).SetPrec(256).SetString(amount)
 	if !ok {
 		return "", fmt.Errorf("invalid decimal amount")
 	}
@@ -853,8 +853,8 @@ func wrappedETHAddress(chainId string) (string, bool) {
 		// Arbitrum WETH
 		return "0x82af49447d8a07e3bd95bd0d56f35241523fbab1", true
 	case "56":
-		// BSC wrapped/peg-ETH
-		return "0x2170Ed0880ac9A755fd29B2688956BD959F933F", true
+		// BSC wrapped/peg-ETH (Binance-Peg Ethereum Token)
+		return "0x2170Ed0880ac9A755fd29B2688956BD959F933F8", true
 	default:
 		return "", false
 	}
