@@ -177,6 +177,7 @@ func TestParseProviderList(t *testing.T) {
 		want []string
 	}{
 		{name: "comma", raw: "0x,1inch", want: []string{"0x", "1inch"}},
+		{name: "with paraswap", raw: "0x,1inch,paraswap", want: []string{"0x", "1inch", "paraswap"}},
 		{name: "plus", raw: "0x+1inch", want: []string{"0x", "1inch"}},
 		{name: "space and duplicate", raw: "0x 1inch 0x", want: []string{"0x", "1inch"}},
 		{name: "empty becomes mock", raw: "", want: []string{"mock"}},
@@ -283,6 +284,59 @@ func newZeroXProvider(baseURL, chainID string) *ZeroXQuoteProvider {
 		apiKey:  "test-key",
 		chainID: chainID,
 		taker:   defaultZeroXTaker,
+	}
+}
+
+func newParaSwapProvider(baseURL, chainID string) *ParaSwapQuoteProvider {
+	return &ParaSwapQuoteProvider{
+		client:  &http.Client{},
+		baseURL: baseURL,
+		chainID: chainID,
+	}
+}
+
+func TestParaSwapGetQuotes_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"priceRoute": map[string]any{
+				"srcAmount":  "100000000000000000",
+				"destAmount": "200000000",
+				"gasCost":    "12345",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := newParaSwapProvider(srv.URL, "1")
+	quotes, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "0.1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes: unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("GetQuotes: want 1 quote, got %d", len(quotes))
+	}
+	if quotes[0].Provider != "paraswap" {
+		t.Errorf("quote.Provider = %q, want \"paraswap\"", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "200000000" {
+		t.Errorf("quote.AmountTo = %q, want \"200000000\"", quotes[0].AmountTo)
+	}
+}
+
+func TestParaSwapGetQuotes_UnsupportedChain(t *testing.T) {
+	p := newParaSwapProvider("http://localhost", "99999")
+	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "0.1",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported chain error, got nil")
 	}
 }
 

@@ -129,6 +129,12 @@ type ZeroXQuoteProvider struct {
 	taker   string
 }
 
+type ParaSwapQuoteProvider struct {
+	client  *http.Client
+	baseURL string
+	chainID string
+}
+
 type namedQuoteProvider struct {
 	name     string
 	provider QuoteProvider
@@ -151,6 +157,14 @@ var supportedZeroXChains = map[string]struct{}{
 	"56":    {},
 	"8453":  {}, // Base
 	"43114": {}, // Avalanche C-Chain
+}
+
+var supportedParaSwapChains = map[string]struct{}{
+	"1":     {},
+	"10":    {},
+	"137":   {},
+	"42161": {},
+	"56":    {},
 }
 
 var (
@@ -198,16 +212,16 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte("Swap HTTP backend is running.\n" +
 		"Use /v1/coins, /v1/swaprate, /v1/swaptrade, /v1/swapstatus/stream.\n" +
-		"Optional 0x provider environment variables:\n" +
-		"  SWAP_QUOTE_PROVIDER=0x\n" +
-		"    or multi-provider mode: SWAP_QUOTE_PROVIDER=0x,1inch (also supports 0x+1inch)\n" +
+		"Optional provider environment variables:\n" +
+		"  SWAP_QUOTE_PROVIDER=0x|1inch|paraswap (comma/plus/space-separated for multi-provider)\n" +
 		"  SWAP_0X_API_KEY=<your-0x-api-key>\n" +
 		"  SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114 (default is 1)\n" +
 		"    1=Ethereum  10=Optimism  137=Polygon  42161=Arbitrum\n" +
 		"    56=BSC  8453=Base  43114=Avalanche\n" +
 		"  SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 (default valid Permit2 taker)\n" +
+		"  SWAP_PARASWAP_CHAIN_ID=1|10|137|42161|56 (default is 1)\n" +
 		"Request body fields (override per-request):\n" +
-		"  chain_id — chain override for /v1/swaprate when using 0x.\n" +
+		"  chain_id — chain override for /v1/swaprate when using on-chain providers.\n" +
 		"  taker   — Permit2 taker address override.\n" +
 		"/v1/coins dynamic source variables:\n" +
 		"  SWAP_COINS_SOURCE=coingecko|static (default coingecko)\n" +
@@ -398,6 +412,10 @@ func isTickerSupportedByActiveProviders(ticker string) bool {
 	if chain1inch == "" {
 		chain1inch = "1"
 	}
+	chainParaSwap := strings.TrimSpace(os.Getenv("SWAP_PARASWAP_CHAIN_ID"))
+	if chainParaSwap == "" {
+		chainParaSwap = "1"
+	}
 
 	for _, name := range names {
 		switch name {
@@ -408,6 +426,12 @@ func isTickerSupportedByActiveProviders(ticker string) bool {
 		case "1inch", "oneinch", "1inch_public", "1inch-public":
 			if _, err := oneInchTokenAddress(chain1inch, normalizeQuoteSymbol(ticker)); err == nil {
 				return true
+			}
+		case "paraswap", "para-swap", "paraswap_public", "paraswap-public":
+			if _, ok := supportedParaSwapChains[chainParaSwap]; ok {
+				if _, err := oneInchTokenAddress(chainParaSwap, normalizeQuoteSymbol(ticker)); err == nil {
+					return true
+				}
 			}
 		case "mock", "none", "external", "generic", "simple":
 			// Non-onchain providers may support arbitrary symbols.
@@ -455,7 +479,7 @@ func swapRateHandler(w http.ResponseWriter, r *http.Request) {
 	req.ChainID = strings.TrimSpace(req.ChainID)
 	if req.ChainID != "" {
 		if _, ok := supportedZeroXChains[req.ChainID]; !ok {
-			http.Error(w, "unsupported chain_id; supported values are 1, 10, 137, 42161, 56", http.StatusBadRequest)
+			http.Error(w, fmt.Sprintf("unsupported chain_id; supported values are %s", strings.Join(supportedZeroXChainsList(), ", ")), http.StatusBadRequest)
 			return
 		}
 	}
@@ -678,6 +702,8 @@ func buildProviderByName(name string) (QuoteProvider, bool) {
 	switch name {
 	case "1inch", "oneinch", "1inch_public", "1inch-public":
 		return newOneInchQuoteProvider(), true
+	case "paraswap", "para-swap", "paraswap_public", "paraswap-public":
+		return newParaSwapQuoteProvider(), true
 	case "0x", "zerox", "0x_public", "0x-public":
 		return newZeroXQuoteProvider(), true
 	case "external", "generic", "simple":
@@ -717,6 +743,26 @@ func newOneInchQuoteProvider() QuoteProvider {
 	return &OneInchQuoteProvider{
 		client:  &http.Client{Timeout: 15 * time.Second},
 		baseURL: quoteURL,
+	}
+}
+
+func newParaSwapQuoteProvider() QuoteProvider {
+	quoteURL := strings.TrimSpace(os.Getenv("SWAP_PARASWAP_URL"))
+	if quoteURL == "" {
+		quoteURL = "https://apiv5.paraswap.io"
+	}
+	chainID := strings.TrimSpace(os.Getenv("SWAP_PARASWAP_CHAIN_ID"))
+	if chainID == "" {
+		chainID = "1"
+	}
+	if _, ok := supportedParaSwapChains[chainID]; !ok {
+		log.Printf("SWAP_PARASWAP_CHAIN_ID %q configured; supported values are %v; defaulting to 1", chainID, supportedParaSwapChainsList())
+		chainID = "1"
+	}
+	return &ParaSwapQuoteProvider{
+		client:  &http.Client{Timeout: 15 * time.Second},
+		baseURL: quoteURL,
+		chainID: chainID,
 	}
 }
 
@@ -962,6 +1008,110 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 	return []Quote{quote}, nil
 }
 
+func (p *ParaSwapQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
+	if req.TickerFrom == "" || req.TickerTo == "" {
+		return nil, fmt.Errorf("ticker_from and ticker_to are required")
+	}
+	if req.AmountFrom == "" {
+		return nil, fmt.Errorf("paraswap API requires amount_from")
+	}
+
+	fromSym := normalizeQuoteSymbol(req.TickerFrom)
+	toSym := normalizeQuoteSymbol(req.TickerTo)
+
+	chainID := p.chainID
+	if req.ChainID != "" {
+		chainID = req.ChainID
+	}
+	if _, ok := supportedParaSwapChains[chainID]; !ok {
+		return nil, fmt.Errorf("unsupported paraswap chain id %q; supported values are %v", chainID, supportedParaSwapChainsList())
+	}
+
+	fromAddr, err := oneInchTokenAddress(chainID, fromSym)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported from token: %w", err)
+	}
+	toAddr, err := oneInchTokenAddress(chainID, toSym)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported to token: %w", err)
+	}
+
+	sellAmount, err := decimalToBaseUnits(req.AmountFrom, tokenDecimals(fromSym))
+	if err != nil {
+		return nil, fmt.Errorf("invalid amount_from: %w", err)
+	}
+
+	quoteURL := fmt.Sprintf("%s/prices?srcToken=%s&destToken=%s&amount=%s&side=SELL&network=%s",
+		strings.TrimSuffix(p.baseURL, "/"),
+		url.QueryEscape(fromAddr),
+		url.QueryEscape(toAddr),
+		url.QueryEscape(sellAmount),
+		url.QueryEscape(chainID),
+	)
+
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, quoteURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	reqHTTP.Header.Set("User-Agent", "swap-http-backend/1.0")
+	reqHTTP.Header.Set("Accept", "application/json")
+
+	resp, err := p.client.Do(reqHTTP)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("paraswap quote error %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	var out struct {
+		PriceRoute struct {
+			SrcAmount string `json:"srcAmount"`
+			DestAmount string `json:"destAmount"`
+			GasCost   string `json:"gasCost"`
+			GasCostUSD string `json:"gasCostUSD"`
+		} `json:"priceRoute"`
+		DestAmount string `json:"destAmount"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+
+	destAmount := out.PriceRoute.DestAmount
+	if destAmount == "" {
+		destAmount = out.DestAmount
+	}
+	if destAmount == "" {
+		return nil, fmt.Errorf("paraswap quote missing destination amount")
+	}
+	srcAmount := out.PriceRoute.SrcAmount
+	if srcAmount == "" {
+		srcAmount = sellAmount
+	}
+	waste := ""
+	if out.PriceRoute.GasCost != "" {
+		waste = "gas=" + out.PriceRoute.GasCost
+	} else if out.PriceRoute.GasCostUSD != "" {
+		waste = "gas_usd=" + out.PriceRoute.GasCostUSD
+	}
+
+	quote := Quote{
+		Provider:      "paraswap",
+		AmountTo:      destAmount,
+		AmountToUSD:   "0",
+		AmountFrom:    srcAmount,
+		AmountFromUSD: "0",
+		Fixed:         "False",
+		Kycrating:     "A",
+		Eta:           1,
+		Waste:         waste,
+	}
+	return []Quote{quote}, nil
+}
+
 func (p *ZeroXQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
 	if req.TickerFrom == "" || req.TickerTo == "" {
 		return nil, fmt.Errorf("ticker_from and ticker_to are required")
@@ -986,20 +1136,7 @@ func (p *ZeroXQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest)
 		taker = req.Taker
 	}
 
-	decimalsMap := map[string]int{
-		"ETH":  18,
-		"DAI":  18,
-		"USDC": 6,
-		"USDT": 6,
-		"BTC":  8,
-		"WBTC": 8,
-	}
-	dec := 18
-	if d, ok := decimalsMap[fromSym]; ok {
-		dec = d
-	}
-
-	sellAmount, err := decimalToBaseUnits(req.AmountFrom, dec)
+	sellAmount, err := decimalToBaseUnits(req.AmountFrom, tokenDecimals(fromSym))
 	if err != nil {
 		return nil, fmt.Errorf("invalid amount_from: %w", err)
 	}
@@ -1248,6 +1385,17 @@ func oneInchTokenAddress(chainId, symbol string) (string, error) {
 	return zeroXTokenAddress(chainId, symbol)
 }
 
+func tokenDecimals(symbol string) int {
+	switch strings.ToUpper(symbol) {
+	case "USDC", "USDT":
+		return 6
+	case "BTC", "WBTC":
+		return 8
+	default:
+		return 18
+	}
+}
+
 func parseAmount(value string) float64 {
 	if value == "" {
 		return 0
@@ -1282,5 +1430,9 @@ func isValidEthAddress(value string) bool {
 }
 
 func supportedZeroXChainsList() []string {
+	return []string{"1", "10", "137", "42161", "56", "8453", "43114"}
+}
+
+func supportedParaSwapChainsList() []string {
 	return []string{"1", "10", "137", "42161", "56"}
 }
