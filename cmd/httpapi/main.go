@@ -1093,9 +1093,9 @@ func (p *ParaSwapQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReque
 	}
 	waste := ""
 	if out.PriceRoute.GasCost != "" {
-		waste = "gas=" + out.PriceRoute.GasCost
+		waste = fmt.Sprintf("gas=%s", out.PriceRoute.GasCost)
 	} else if out.PriceRoute.GasCostUSD != "" {
-		waste = "gas_usd=" + out.PriceRoute.GasCostUSD
+		waste = fmt.Sprintf("gas_usd=%s", out.PriceRoute.GasCostUSD)
 	}
 
 	quote := Quote{
