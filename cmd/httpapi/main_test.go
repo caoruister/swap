@@ -198,6 +198,21 @@ func TestParseProviderList(t *testing.T) {
 	}
 }
 
+func TestIsChainIDSupportedByActiveProviders(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_PROVIDER", "paraswap")
+	if !isChainIDSupportedByActiveProviders("1") {
+		t.Fatal("expected chain 1 to be supported for paraswap")
+	}
+	if isChainIDSupportedByActiveProviders("8453") {
+		t.Fatal("expected chain 8453 to be unsupported for paraswap")
+	}
+
+	t.Setenv("SWAP_QUOTE_PROVIDER", "0x,paraswap")
+	if !isChainIDSupportedByActiveProviders("8453") {
+		t.Fatal("expected chain 8453 to be supported when 0x is active")
+	}
+}
+
 func TestMultiQuoteProvider_AggregatesSortsAndToleratesFailure(t *testing.T) {
 	mp := &MultiQuoteProvider{providers: []namedQuoteProvider{
 		{

@@ -429,7 +429,7 @@ func isTickerSupportedByActiveProviders(ticker string) bool {
 			}
 		case "paraswap", "para-swap", "paraswap_public", "paraswap-public":
 			if _, ok := supportedParaSwapChains[chainParaSwap]; ok {
-				if _, err := oneInchTokenAddress(chainParaSwap, normalizeQuoteSymbol(ticker)); err == nil {
+				if _, err := paraSwapTokenAddress(chainParaSwap, normalizeQuoteSymbol(ticker)); err == nil {
 					return true
 				}
 			}
@@ -439,6 +439,33 @@ func isTickerSupportedByActiveProviders(ticker string) bool {
 		}
 	}
 
+	return false
+}
+
+func isChainIDSupportedByActiveProviders(chainID string) bool {
+	chainID = strings.TrimSpace(chainID)
+	if chainID == "" {
+		return true
+	}
+	names := parseProviderList(strings.TrimSpace(os.Getenv("SWAP_QUOTE_PROVIDER")))
+	if len(names) == 0 {
+		return true
+	}
+
+	for _, name := range names {
+		switch name {
+		case "0x", "zerox", "0x_public", "0x-public", "1inch", "oneinch", "1inch_public", "1inch-public":
+			if _, ok := supportedZeroXChains[chainID]; ok {
+				return true
+			}
+		case "paraswap", "para-swap", "paraswap_public", "paraswap-public":
+			if _, ok := supportedParaSwapChains[chainID]; ok {
+				return true
+			}
+		case "mock", "none", "external", "generic", "simple":
+			return true
+		}
+	}
 	return false
 }
 
@@ -478,8 +505,8 @@ func swapRateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	req.ChainID = strings.TrimSpace(req.ChainID)
 	if req.ChainID != "" {
-		if _, ok := supportedZeroXChains[req.ChainID]; !ok {
-			http.Error(w, fmt.Sprintf("unsupported chain_id; supported values are %s", strings.Join(supportedZeroXChainsList(), ", ")), http.StatusBadRequest)
+		if !isChainIDSupportedByActiveProviders(req.ChainID) {
+			http.Error(w, "unsupported chain_id for active provider(s)", http.StatusBadRequest)
 			return
 		}
 	}
@@ -1027,11 +1054,11 @@ func (p *ParaSwapQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReque
 		return nil, fmt.Errorf("unsupported paraswap chain id %q; supported values are %v", chainID, supportedParaSwapChainsList())
 	}
 
-	fromAddr, err := oneInchTokenAddress(chainID, fromSym)
+	fromAddr, err := paraSwapTokenAddress(chainID, fromSym)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported from token: %w", err)
 	}
-	toAddr, err := oneInchTokenAddress(chainID, toSym)
+	toAddr, err := paraSwapTokenAddress(chainID, toSym)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported to token: %w", err)
 	}
@@ -1383,6 +1410,11 @@ func wrappedETHAddress(chainId string) (string, bool) {
 
 func oneInchTokenAddress(chainId, symbol string) (string, error) {
 	return zeroXTokenAddress(chainId, symbol)
+}
+
+func paraSwapTokenAddress(chainId, symbol string) (string, error) {
+	// ParaSwap uses the same token-address mapping in this backend.
+	return oneInchTokenAddress(chainId, symbol)
 }
 
 func tokenDecimals(symbol string) int {
