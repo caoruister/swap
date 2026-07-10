@@ -196,5 +196,11 @@ if [[ "${SKIP_TUI}" == "1" ]]; then
   exit 0
 fi
 
+echo "Building swap TUI binary ..."
+CGO_ENABLED=0 go build -o /tmp/swap-tui ./cmd/swap
+
 echo "Launching swap TUI (SWAP_API_URL=http://127.0.0.1:${PORT}) ..."
-CGO_ENABLED=0 SWAP_API_URL="http://127.0.0.1:${PORT}" go run ./cmd/swap
+SWAP_API_URL="http://127.0.0.1:${PORT}" /tmp/swap-tui
+api_exit_code=$?
+echo "swap TUI exited with code ${api_exit_code}"
+exit "${api_exit_code}"

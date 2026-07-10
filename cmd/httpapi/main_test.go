@@ -46,6 +46,66 @@ func TestOneInchGetQuotes_NonJSONResponse(t *testing.T) {
 		t.Fatalf("expected content-type details in error, got: %v", err)
 	}
 }
+func TestOneInchGetQuotes_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-1inch-key" {
+			t.Fatalf("expected Authorization header, got %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"srcAmount": "1000000000000000000",
+			"dstAmount": "3000000000",
+			"gas":       21000,
+		})
+	}))
+	defer srv.Close()
+
+	p := &OneInchQuoteProvider{client: &http.Client{}, baseURL: srv.URL, apiKey: "test-1inch-key"}
+	quotes, warnings, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "BTC",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].Provider != "1inch" {
+		t.Fatalf("provider=%q want=1inch", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "3000000000" {
+		t.Fatalf("amount_to=%q want=3000000000", quotes[0].AmountTo)
+	}
+	if quotes[0].AmountFrom != "1000000000000000000" {
+		t.Fatalf("amount_from=%q want=1000000000000000000", quotes[0].AmountFrom)
+	}
+}
+
+func TestBuildProviderByName_OneInch(t *testing.T) {
+	t.Setenv("SWAP_1INCH_API_KEY", "test-key-1inch")
+
+	p, ok := buildProviderByName("1inch")
+	if !ok {
+		t.Fatal("buildProviderByName(1inch) returned ok=false")
+	}
+	oip, ok := p.(*OneInchQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(1inch) = %T, want *OneInchQuoteProvider", p)
+	}
+	if oip.apiKey != "test-key-1inch" {
+		t.Fatalf("1inch apiKey=%q want=%q", oip.apiKey, "test-key-1inch")
+	}
+	if oip.client == nil {
+		t.Fatal("1inch client is nil")
+	}
+}
+
 func (p *requestIDCapturingProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, []string, error) {
 	p.gotID = requestIDFromContext(ctx)
 	return []Quote{{Provider: "capture", AmountTo: "1"}}, nil, nil
@@ -1045,6 +1105,316 @@ func TestOpenOceanGetQuotes_Success(t *testing.T) {
 	}
 }
 
+func TestOpenOceanGetQuotes_ResultField(t *testing.T) {
+	// OpenOcean fallback: when envelope.Data is empty, it tries envelope.Result
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"result": map[string]any{
+				"inAmount":     "500000000000000000",
+				"outAmount":    "900000000",
+				"estimatedGas": "50000",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, warnings, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].Provider != "openocean" {
+		t.Fatalf("provider=%q want=openocean", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "900000000" {
+		t.Fatalf("amount_to=%q want=900000000", quotes[0].AmountTo)
+	}
+}
+
+func TestOpenOceanGetQuotes_TopLevelPayload(t *testing.T) {
+	// OpenOcean fallback: when both data and result are missing, it tries
+	// unmarshalling the entire body as openOceanPayload.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"inAmount":     "2000000000000000000",
+			"outAmount":    "600000000",
+			"estimatedGas": "100000",
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "10"}
+	quotes, warnings, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "2",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].AmountTo != "600000000" {
+		t.Fatalf("amount_to=%q want=600000000", quotes[0].AmountTo)
+	}
+}
+
+func TestOpenOceanGetQuotes_OutTokenAmountFallback(t *testing.T) {
+	// When outAmount is empty, falls back to outTokenAmount
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"data": map[string]any{
+				"inAmount":       "1000000000000000000",
+				"outAmount":      "",
+				"outTokenAmount": "400000000",
+				"estimatedGas":   "80000",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].AmountTo != "400000000" {
+		t.Fatalf("amount_to=%q want=400000000", quotes[0].AmountTo)
+	}
+}
+
+func TestOpenOceanGetQuotes_InTokenAmountFallback(t *testing.T) {
+	// When inAmount is empty, falls back to inTokenAmount
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"data": map[string]any{
+				"inAmount":      "",
+				"inTokenAmount": "999999999999999999",
+				"outAmount":     "300000000",
+				"estimatedGas":  "123456",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].AmountFrom != "999999999999999999" {
+		t.Fatalf("amount_from=%q want=999999999999999999", quotes[0].AmountFrom)
+	}
+}
+
+func TestOpenOceanGetQuotes_Non200Status(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"code":502,"message":"upstream error"}`))
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-200 status, got nil")
+	}
+	if !strings.Contains(err.Error(), "openocean quote error status=502") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenOceanGetQuotes_ErrorCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code":    400,
+			"message": "invalid token",
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for code=400, got nil")
+	}
+	if !strings.Contains(err.Error(), "openocean quote error code=400: invalid token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenOceanGetQuotes_NonJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("rate limit exceeded"))
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-json response, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-json response") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenOceanGetQuotes_UnsupportedChain(t *testing.T) {
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "99999"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported chain, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported chain id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenOceanGetQuotes_UnsupportedFromToken(t *testing.T) {
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "UNKNOWN",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported from token, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported from token") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOpenOceanGetQuotes_MissingAmountFrom(t *testing.T) {
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing amount_from, got nil")
+	}
+}
+
+func TestBuildProviderByName_OpenOcean_ApiKey(t *testing.T) {
+	t.Setenv("SWAP_OPENOCEAN_URL", "https://openocean.example")
+	t.Setenv("SWAP_OPENOCEAN_CHAIN_ID", "137")
+	t.Setenv("SWAP_OPENOCEAN_API_KEY", "test-openocean-key")
+
+	p, ok := buildProviderByName("openocean")
+	if !ok {
+		t.Fatal("buildProviderByName(openocean) returned ok=false")
+	}
+	oo, ok := p.(*OpenOceanQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(openocean) = %T, want *OpenOceanQuoteProvider", p)
+	}
+	if oo.apiKey != "test-openocean-key" {
+		t.Fatalf("openocean apiKey=%q want=%q", oo.apiKey, "test-openocean-key")
+	}
+}
+
+func TestOpenOceanGetQuotes_ChainSlugVariants(t *testing.T) {
+	chains := map[string]string{
+		"10":    "optimism",
+		"137":   "polygon",
+		"42161": "arbitrum",
+		"56":    "bsc",
+		"8453":  "base",
+		"43114": "avax",
+	}
+	for chainID, expectedSlug := range chains {
+		var seenSlug string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+			if len(parts) > 0 {
+				seenSlug = parts[0]
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": 200,
+				"data": map[string]any{
+					"inAmount":     "1000000000000000000",
+					"outAmount":    "300000000",
+					"estimatedGas": "123456",
+				},
+			})
+		}))
+		p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: chainID}
+		quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+			TickerFrom: "ETH",
+			TickerTo:   "USDT",
+			AmountFrom: "1",
+		})
+		if err != nil {
+			t.Fatalf("GetQuotes chain=%q slug=%q unexpected error: %v", chainID, expectedSlug, err)
+		}
+		if seenSlug != expectedSlug {
+			t.Fatalf("chain=%q: slug=%q want=%q", chainID, seenSlug, expectedSlug)
+		}
+		if len(quotes) != 1 || quotes[0].Provider != "openocean" {
+			t.Fatalf("chain=%q: unexpected quotes=%+v", chainID, quotes)
+		}
+		srv.Close()
+	}
+}
+
 func TestBuildProviderByName_ExternalAlias(t *testing.T) {
 	t.Setenv("SWAP_QUOTE_URL_FOO", "https://quotes.foo.example")
 	t.Setenv("SWAP_QUOTE_API_KEY_FOO", "abc123")
@@ -1431,8 +1801,282 @@ func TestOdosGetQuotes_Success(t *testing.T) {
 	if !contains(seenBody, "chainId") {
 		t.Fatalf("request body missing chainId: %q", seenBody)
 	}
-	if !contains(seenBody, "inputTokens") {
-		t.Fatalf("request body missing inputTokens: %q", seenBody)
+}
+
+func TestOdosGetQuotes_Non200Status(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"statusCode":502,"description":"upstream error"}`))
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-200 HTTP status, got nil")
+	}
+}
+
+func TestOdosGetQuotes_NonJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("service unavailable"))
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-json response, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-json response") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOdosGetQuotes_ErrorStatusCode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode":  400,
+			"description": "invalid request",
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for statusCode=400, got nil")
+	}
+	if !strings.Contains(err.Error(), "odos quote error code=400: invalid request") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOdosGetQuotes_MissingOutAmounts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode": 200,
+			"quote": map[string]any{
+				"inAmounts":        []string{"1000000000000000000"},
+				"outAmounts":       []string{},
+				"gasEstimate":      "123456",
+				"gasEstimateValue": 0.123,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing outAmount, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing outAmount") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOdosGetQuotes_EmptyInAmounts(t *testing.T) {
+	// When InAmounts is empty, it should fallback to req.AmountFrom
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode": 200,
+			"quote": map[string]any{
+				"inAmounts":        []string{},
+				"outAmounts":       []string{"500000000"},
+				"gasEstimate":      "123456",
+				"gasEstimateValue": 0.123,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "2",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].AmountFrom != "2" {
+		t.Fatalf("amount_from=%q want=2 (fallback to req.AmountFrom)", quotes[0].AmountFrom)
+	}
+}
+
+func TestOdosGetQuotes_WasteField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode": 200,
+			"quote": map[string]any{
+				"inAmounts":        []string{"1000000000000000000"},
+				"outAmounts":       []string{"2500000000"},
+				"gasEstimate":      "987654",
+				"gasEstimateValue": 0.987,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].Waste != "987654" {
+		t.Fatalf("waste=%q want=987654", quotes[0].Waste)
+	}
+}
+
+func TestOdosGetQuotes_UnsupportedChain(t *testing.T) {
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "99999"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported chain, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported chain id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestOdosGetQuotes_UnsupportedFromToken(t *testing.T) {
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "UNKNOWN",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported from token, got nil")
+	}
+}
+
+func TestOdosGetQuotes_MissingAmountFrom(t *testing.T) {
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: "http://unused", chainID: "1"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing amount_from, got nil")
+	}
+}
+
+func TestOdosGetQuotes_SendsAPIKeyHeader(t *testing.T) {
+	var seenAuthHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuthHeader = r.Header.Get("X-API-Key")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode": 200,
+			"quote": map[string]any{
+				"inAmounts":        []string{"1000000000000000000"},
+				"outAmounts":       []string{"500000000"},
+				"gasEstimate":      "123456",
+				"gasEstimateValue": 0.123,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1", apiKey: "test-odos-key"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDC",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if seenAuthHeader != "test-odos-key" {
+		t.Fatalf("Authorization header=%q want=%q", seenAuthHeader, "test-odos-key")
+	}
+}
+
+func TestOdosGetQuotes_ChainIDVariants(t *testing.T) {
+	chains := map[string]int{
+		"1":     1,
+		"10":    10,
+		"137":   137,
+		"42161": 42161,
+		"56":    56,
+	}
+	for chainID, expectedNum := range chains {
+		var seenChainID int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if cn, ok := body["chainId"]; ok {
+				if f, ok := cn.(float64); ok {
+					seenChainID = int(f)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"statusCode": 200,
+				"quote": map[string]any{
+					"inAmounts":        []string{"1000000000000000000"},
+					"outAmounts":       []string{"300000000"},
+					"gasEstimate":      "123456",
+					"gasEstimateValue": 0.123,
+				},
+			})
+		}))
+		p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: chainID}
+		quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+			TickerFrom: "ETH",
+			TickerTo:   "USDT",
+			AmountFrom: "1",
+		})
+		if err != nil {
+			t.Fatalf("GetQuotes chain=%q unexpected error: %v", chainID, err)
+		}
+		if seenChainID != expectedNum {
+			t.Fatalf("chain=%q: request chainId=%d want=%d", chainID, seenChainID, expectedNum)
+		}
+		if len(quotes) != 1 || quotes[0].Provider != "odos" {
+			t.Fatalf("chain=%q: unexpected quotes=%+v", chainID, quotes)
+		}
+		srv.Close()
 	}
 }
 

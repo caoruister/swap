@@ -126,6 +126,7 @@ type ExternalQuoteProvider struct {
 type OneInchQuoteProvider struct {
 	client  *http.Client
 	baseURL string
+	apiKey  string
 }
 
 type OpenOceanQuoteProvider struct {
@@ -1449,11 +1450,13 @@ func normalizeExternalQuotePath(path string) string {
 func newOneInchQuoteProvider() QuoteProvider {
 	quoteURL := os.Getenv("SWAP_QUOTE_URL")
 	if quoteURL == "" {
-		quoteURL = "https://api.1inch.io/v5.0"
+		quoteURL = "https://api.1inch.dev/swap/v6.0"
 	}
+	apiKey := strings.TrimSpace(os.Getenv("SWAP_1INCH_API_KEY"))
 	return &OneInchQuoteProvider{
 		client:  &http.Client{Timeout: 15 * time.Second},
 		baseURL: quoteURL,
+		apiKey:  apiKey,
 	}
 }
 
@@ -1786,7 +1789,7 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, nil, fmt.Errorf("ticker_from and ticker_to are required")
 	}
 	if req.AmountFrom == "" {
-		return nil, nil, fmt.Errorf("1inch public API requires amount_from")
+		return nil, nil, fmt.Errorf("1inch requires amount_from")
 	}
 
 	fromToken := normalizeQuoteSymbol(req.TickerFrom)
@@ -1809,12 +1812,20 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, nil, fmt.Errorf("unsupported to token: %w", err)
 	}
 
-	quoteURL := fmt.Sprintf("%s/%s/quote?fromTokenAddress=%s&toTokenAddress=%s&amount=%s",
+	// 1inch v6 API requires amounts in base units (wei for ETH)
+	fromDecimals := tokenDecimalsForSymbol(fromToken)
+	amountBase, err := decimalToBaseUnits(req.AmountFrom, fromDecimals)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid amount_from: %w", err)
+	}
+
+	// v6 API uses src/dst params and requires Authorization header
+	quoteURL := fmt.Sprintf("%s/%s/quote?src=%s&dst=%s&amount=%s",
 		strings.TrimSuffix(p.baseURL, "/"),
 		chainId,
 		url.QueryEscape(fromAddr),
 		url.QueryEscape(toAddr),
-		url.QueryEscape(req.AmountFrom),
+		url.QueryEscape(amountBase),
 	)
 
 	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, quoteURL, nil)
@@ -1822,6 +1833,10 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, nil, err
 	}
 	reqHTTP.Header.Set("User-Agent", quoteUserAgent)
+	reqHTTP.Header.Set("Accept", "application/json")
+	if p.apiKey != "" {
+		reqHTTP.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 
 	resp, err := p.client.Do(reqHTTP)
 	if err != nil {
@@ -1842,17 +1857,11 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, nil, fmt.Errorf("1inch quote error status=%d content_type=%q body=%s", resp.StatusCode, contentType, bodySnippet)
 	}
 
+	// v6 response format
 	var out struct {
-		FromToken struct {
-			Symbol string `json:"symbol"`
-		} `json:"fromToken"`
-		ToToken struct {
-			Symbol string `json:"symbol"`
-		} `json:"toToken"`
-		ToTokenAmount   string `json:"toTokenAmount"`
-		FromTokenAmount string `json:"fromTokenAmount"`
-		EstimatedGas    int64  `json:"estimatedGas"`
-		Protocols       any    `json:"protocols"`
+		SrcAmount string `json:"srcAmount"`
+		DstAmount string `json:"dstAmount"`
+		Gas       int64  `json:"gas"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		trimmed := strings.TrimSpace(string(body))
@@ -1866,18 +1875,22 @@ func (p *OneInchQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReques
 		return nil, nil, fmt.Errorf("1inch non-json response status=%d content_type=%q parse_error=%v body=%s", resp.StatusCode, contentType, err, bodySnippet)
 	}
 
-	amountToUSD, amountFromUSD, usdWarnings := computeQuoteUSDAmounts(ctx, fromToken, toToken, out.FromTokenAmount, out.ToTokenAmount)
+	if out.DstAmount == "" {
+		return nil, nil, fmt.Errorf("1inch response missing dstAmount")
+	}
+
+	amountToUSD, amountFromUSD, usdWarnings := computeQuoteUSDAmounts(ctx, fromToken, toToken, out.SrcAmount, out.DstAmount)
 
 	quote := Quote{
 		Provider:      "1inch",
-		AmountTo:      out.ToTokenAmount,
+		AmountTo:      out.DstAmount,
 		AmountToUSD:   amountToUSD,
-		AmountFrom:    out.FromTokenAmount,
+		AmountFrom:    out.SrcAmount,
 		AmountFromUSD: amountFromUSD,
 		Fixed:         "False",
 		Kycrating:     "A",
 		Eta:           1,
-		Waste:         fmt.Sprintf("gas=%d", out.EstimatedGas),
+		Waste:         fmt.Sprintf("gas=%d", out.Gas),
 	}
 	return []Quote{quote}, usdWarnings, nil
 }
