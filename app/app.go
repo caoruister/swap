@@ -53,6 +53,9 @@ type SwapUI struct {
 	rateWarnings       []string
 
 	pg progress.Model
+
+	// current theme applied to all UI components
+	theme Theme
 }
 
 type CoinData struct {
@@ -77,11 +80,13 @@ func NewTSwapUI(cfg *Config, api APIClient, debug bool) *SwapUI {
 		showWarningDetails = envShow
 	}
 
+	themeName := os.Getenv("SWAP_THEME")
 	m := &SwapUI{
 		state: &AppState{},
 		api:   api,
 		cfg:   cfg,
 		cd:    newCoinData(),
+		theme: resolveTheme(ParseThemeName(themeName)),
 
 		table: NewSwapTable(api),
 
