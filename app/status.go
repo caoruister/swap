@@ -12,6 +12,11 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// CopyMsg is a tea.Msg that triggers a clipboard copy operation.
+type CopyMsg struct {
+	Text string
+}
+
 func (m *SwapUI) formatStatus(s string) string {
 	var out string
 	switch s {

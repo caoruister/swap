@@ -502,6 +502,26 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SwapStatusRespMsg:
 		if msg.Status == "finished" {
 			cmds = append(cmds, m.SetSpinning(false))
+			// Auto-copy transaction details to clipboard on completion
+			clipText := clipboardStatusText(
+				msg.SwapStatusResponse.GetCoinFrom(),
+				msg.SwapStatusResponse.GetCoinTo(),
+				msg.SwapStatusResponse.GetNetworkFrom(),
+				msg.SwapStatusResponse.GetNetworkTo(),
+				msg.SwapStatusResponse.GetAmountFrom(),
+				msg.SwapStatusResponse.GetAmountTo(),
+				msg.SwapStatusResponse.GetTickerFrom(),
+				msg.SwapStatusResponse.GetTickerTo(),
+				msg.SwapStatusResponse.GetAddressProvider(),
+				msg.SwapStatusResponse.GetAddressUser(),
+				msg.SwapStatusResponse.GetProvider(),
+			)
+			cmds = append(cmds, func() tea.Msg {
+				if err := CopyToClipboard(clipText); err != nil {
+					return AddLog("clipboard: copy failed: %v", err)()
+				}
+				return AddLog("clipboard: transaction details copied")()
+			})
 		}
 		m.trxView.SetContent(m.setStatusContent(msg))
 		cmds = append(cmds,
