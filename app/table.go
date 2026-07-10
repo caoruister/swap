@@ -310,6 +310,11 @@ func (t SwapTable) SetPayment(v bool) SwapTable {
 	return t
 }
 
+// SetState sets the table's current view state (CoinTable or RateTable).
+func (t *SwapTable) SetState(s TableState) {
+	t.state = s
+}
+
 func (t SwapTable) SelectedRateDetail() string {
 	if t.state != RateTableState {
 		return ""

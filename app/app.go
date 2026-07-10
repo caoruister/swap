@@ -193,27 +193,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, AddLog("pay choice: %v", m.cd.Payment))
 		}
 
-		// todo(leo): refactor this
-		if m.tableFilter.Focused() {
-			m.tableFilter, cmd = m.tableFilter.Update(msg)
-			cmds = append(cmds, cmd)
-			m.table, cmd = m.table.Update(CoinFilterMsg{Query: m.tableFilter.Value()})
-			cmds = append(cmds, cmd)
-
-			switch msg.String() {
-			case "esc":
-				cmds = append(cmds, AddLog("filter: esc pressed"))
-				m.tableFilter.Blur()
-				m.tableFilter.Reset()
-				m.table, cmd = m.table.Update(CoinReqRespMsg{Resp: m.table.coinList})
-				m.table.Focus()
-				cmds = append(cmds, cmd)
-			case "enter":
-				cmds = append(cmds, AddLog("filter: enter pressed"))
-				m.tableFilter.Blur()
-				m.tableFilter.Reset()
-				m.table.Focus()
-			}
+		if m.handleTableFilterInput(msg, &cmd, &cmds) {
 			return m, tea.Batch(cmds...)
 		}
 
@@ -308,7 +288,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				cmds = append(cmds, AddLog("input amount: %v", m.cd.Amount.Value()))
 				cmds = append(cmds, m.SetSpinning(true))
-				m.table.state = RateTableState // todo(leo): refactor this
+				m.table.SetState(RateTableState)
 				req := SwapRateReqMsg{
 					TickerFrom:  m.cd.From.GetTicker(),
 					TickerTo:    m.cd.To.GetTicker(),
@@ -336,7 +316,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.table.rateTable.SetRows(nil) // clear rate table
 				m.cd.Exchange = ""
 				m.selectedRateNote = ""
-				m.table.state = CoinTableState // todo(leo): refactor
+				m.table.SetState(CoinTableState)
 				m.state.GoTo(InputAmount)
 				cmds = append(cmds, m.table.Init())
 				cmds = append(cmds, m.cd.Amount.Focus())
@@ -484,7 +464,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.statusNote = ""
 		}
-		m.table.state = RateTableState
+		m.table.SetState(RateTableState)
 		m.table.Focus()
 		m.table, cmd = m.table.Update(msg)
 		cmds = append(cmds, cmd)
@@ -724,6 +704,34 @@ func (m *SwapUI) SetSpinning(enabled bool) tea.Cmd {
 		return m.sp.Tick
 	}
 	return nil
+}
+
+// handleTableFilterInput processes table filter key events when the filter is focused.
+// Returns true if the filter was active and handled the input (caller should return early).
+func (m *SwapUI) handleTableFilterInput(msg tea.KeyMsg, cmd *tea.Cmd, cmds *[]tea.Cmd) bool {
+	if !m.tableFilter.Focused() {
+		return false
+	}
+	m.tableFilter, *cmd = m.tableFilter.Update(msg)
+	*cmds = append(*cmds, *cmd)
+	m.table, *cmd = m.table.Update(CoinFilterMsg{Query: m.tableFilter.Value()})
+	*cmds = append(*cmds, *cmd)
+
+	switch msg.String() {
+	case "esc":
+		*cmds = append(*cmds, AddLog("filter: esc pressed"))
+		m.tableFilter.Blur()
+		m.tableFilter.Reset()
+		m.table, *cmd = m.table.Update(CoinReqRespMsg{Resp: m.table.coinList})
+		m.table.Focus()
+		*cmds = append(*cmds, *cmd)
+	case "enter":
+		*cmds = append(*cmds, AddLog("filter: enter pressed"))
+		m.tableFilter.Blur()
+		m.tableFilter.Reset()
+		m.table.Focus()
+	}
+	return true
 }
 
 func (m *SwapUI) toggleWarningDetails() {
