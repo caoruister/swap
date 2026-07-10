@@ -18,6 +18,30 @@ func (m *SwapUI) View() string {
 		msg := "Swap needs a larger terminal window to function properly."
 		return style.Render(msg)
 	}
+	usdBadgeView := func() string {
+		badge := strings.TrimSpace(m.usdPriceBadge)
+		if badge == "" {
+			return ""
+		}
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+		if strings.Contains(strings.ToLower(badge), "cached") {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true)
+		}
+		return style.Render(badge)
+	}
+	warningModeView := func() string {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
+		if m.showWarningDetails {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
+		}
+		return style.Render(m.warningDetailsLabel())
+	}
+	trxUSDNoticeView := func() string {
+		if !strings.Contains(strings.ToLower(strings.TrimSpace(m.usdPriceBadge)), "cached") {
+			return ""
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("USD is using cached market data; values may be stale.")
+	}
 
 	mainView := func() string {
 		if m.state.IsAt(TrxStatus) {
@@ -29,6 +53,10 @@ func (m *SwapUI) View() string {
 					Border(b).
 					Padding(0, 1)
 				title := style.Render("Transaction")
+				if badge := usdBadgeView(); badge != "" {
+					title = lipgloss.JoinHorizontal(lipgloss.Left, title, " ", badge)
+				}
+				title = lipgloss.JoinHorizontal(lipgloss.Left, title, " ", warningModeView())
 				line := strings.Repeat("─", max(0, m.trxView.Width-lipgloss.Width(title)))
 				return lipgloss.JoinHorizontal(
 					lipgloss.Center,
@@ -50,7 +78,11 @@ func (m *SwapUI) View() string {
 				)
 			}()
 
-			return titleStyle + "\n" + m.trxView.View() + "\n" + infoStyle
+			notice := trxUSDNoticeView()
+			if notice == "" {
+				return titleStyle + "\n" + m.trxView.View() + "\n" + infoStyle
+			}
+			return titleStyle + "\n" + m.trxView.View() + "\n" + notice + "\n" + infoStyle
 		} else {
 			out := m.table.View()
 			out += "\n"
@@ -145,6 +177,23 @@ func (m *SwapUI) View() string {
 		}(),
 		mainView,
 		swapBar,
+		usdBadgeView(),
+		warningModeView(),
+		func() string {
+			if !m.showWarningDetails {
+				return ""
+			}
+			if strings.TrimSpace(m.statusNote) == "" {
+				return ""
+			}
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render(m.statusNote)
+		}(),
+		func() string {
+			if strings.TrimSpace(m.selectedRateNote) == "" {
+				return ""
+			}
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Render(m.selectedRateNote)
+		}(),
 		addressView,
 
 		m.log.View(),

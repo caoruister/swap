@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,10 +43,15 @@ func NewConfig() (*Config, error) {
 		cfg = ini.Empty()
 	}
 
+	hmacSecret, err := loadOrGenerateSalt()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		path:       path,
 		cfg:        cfg,
-		hmacSecret: loadOrGenerateSalt(),
+		hmacSecret: hmacSecret,
 	}, nil
 }
 
@@ -120,10 +127,19 @@ func (c *Config) DeleteAddress(ticker, network, address string) {
 	_ = c.save()
 }
 
-func loadOrGenerateSalt() []byte {
+func (c *Config) GetShowWarningDetails(defaultValue bool) bool {
+	return c.cfg.Section("ui").Key("show_warning_details").MustBool(defaultValue)
+}
+
+func (c *Config) SetShowWarningDetails(enabled bool) error {
+	c.cfg.Section("ui").Key("show_warning_details").SetValue(strconv.FormatBool(enabled))
+	return c.save()
+}
+
+func loadOrGenerateSalt() ([]byte, error) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		panic("failed to get config directory: " + err.Error())
+		return nil, fmt.Errorf("failed to get config directory: %w", err)
 	}
 	appConfigDir := filepath.Join(configDir, "swap")
 	saltFile := filepath.Join(appConfigDir, "secret.bin")
@@ -131,26 +147,26 @@ func loadOrGenerateSalt() []byte {
 
 	// #nosec G304 -- saltFile is constructed from os.UserConfigDir and hardcoded strings, not user input
 	if salt, err := os.ReadFile(saltFile); err == nil {
-		return salt
+		return salt, nil
 	}
 
 	// Generate new 32-byte (256-bit) salt
 	newSalt := make([]byte, 32)
 	if _, err := rand.Read(newSalt); err != nil {
-		panic("failed to generate secure salt: " + err.Error())
+		return nil, fmt.Errorf("failed to generate secure salt: %w", err)
 	}
 
 	// Ensure config directory exists
 	if err := os.MkdirAll(appConfigDir, 0700); err != nil {
-		panic("failed to create config directory: " + err.Error())
+		return nil, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
 	// Save salt with restrictive permissions
 	if err := os.WriteFile(saltFile, newSalt, 0600); err != nil {
-		panic("failed to save salt file: " + err.Error())
+		return nil, fmt.Errorf("failed to save salt file: %w", err)
 	}
 
-	return newSalt
+	return newSalt, nil
 }
 
 func (c *Config) generateHMAC(address string) string {

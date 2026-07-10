@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -28,8 +30,15 @@ type SwapTable struct {
 	tradeTable    table.Model
 
 	coinList []*pb.Coin
+	rateMeta []rateRowMeta
 
 	payment bool
+}
+
+type rateRowMeta struct {
+	provider     string
+	amountTicker string
+	exactAmount  string
 }
 
 func NewSwapTable(api APIClient) SwapTable {
@@ -127,15 +136,16 @@ func (t SwapTable) Update(msg tea.Msg) (SwapTable, tea.Cmd) {
 	case SwapRateRespMsg:
 		cmds = append(cmds, AddLog("table: swap rate req success"))
 		quotes := msg.Resp.Quotes.GetQuotes()
-		ticker := func() string {
+		amountTicker := func() string {
 			var s string
 			if t.payment {
 				s = strings.ToUpper(msg.Resp.TickerFrom)
 			} else {
 				s = strings.ToUpper(msg.Resp.TickerTo)
 			}
-			return fmt.Sprintf("Amount (%s)", s)
+			return s
 		}()
+		ticker := fmt.Sprintf("Amount (%s)", amountTicker)
 		columns := []table.Column{
 			{Title: "DEX Name", Width: 15},
 			{Title: ticker, Width: 12},
@@ -146,18 +156,25 @@ func (t SwapTable) Update(msg tea.Msg) (SwapTable, tea.Cmd) {
 			{Title: "Spread", Width: 8},
 		}
 		sort.Slice(quotes, func(i, j int) bool {
-			return quotes[i].GetAmountTo_USD() > quotes[j].GetAmountTo_USD()
+			if t.payment {
+				return parseUSDValue(quotes[i].GetAmountFrom_USD()) < parseUSDValue(quotes[j].GetAmountFrom_USD())
+			}
+			return parseUSDValue(quotes[i].GetAmountTo_USD()) > parseUSDValue(quotes[j].GetAmountTo_USD())
 		})
+		spreadValues := computeSpreadPercentsByBest(quotes, t.payment)
 		rows := make([]table.Row, len(quotes))
+		meta := make([]rateRowMeta, len(quotes))
 		for i, quote := range quotes {
+			amount := func() string {
+				if t.payment {
+					return quote.GetAmountFrom()
+				}
+				return quote.GetAmountTo()
+			}()
+			exactAmount := formatQuoteAmountExact(amount, amountTicker)
 			rows[i] = table.Row{
 				quote.GetProvider(),
-				func() string {
-					if t.payment {
-						return quote.GetAmountFrom()
-					}
-					return quote.GetAmountTo()
-				}(),
+				formatQuoteAmount(amount, amountTicker),
 				func() string {
 					if t.payment {
 						return fmt.Sprintf("$%s", quote.GetAmountFrom_USD())
@@ -172,10 +189,16 @@ func (t SwapTable) Update(msg tea.Msg) (SwapTable, tea.Cmd) {
 				}(),
 				quote.GetKycrating(),
 				fmt.Sprintf("%.f mins", quote.GetEta()),
-				fmt.Sprintf("%s%%", quote.GetWaste()),
+				spreadValues[i],
+			}
+			meta[i] = rateRowMeta{
+				provider:     quote.GetProvider(),
+				amountTicker: amountTicker,
+				exactAmount:  exactAmount,
 			}
 		}
 		t.state = RateTableState
+		t.rateMeta = meta
 		t.rateTable.SetColumns(columns)
 		t.rateTable.SetRows(rows)
 		t.rateTable.SetCursor(0)
@@ -285,4 +308,163 @@ func (t SwapTable) Height() int {
 func (t SwapTable) SetPayment(v bool) SwapTable {
 	t.payment = v
 	return t
+}
+
+func (t SwapTable) SelectedRateDetail() string {
+	if t.state != RateTableState {
+		return ""
+	}
+	idx := t.rateTable.Cursor()
+	if idx < 0 || idx >= len(t.rateMeta) {
+		return ""
+	}
+	m := t.rateMeta[idx]
+	if strings.TrimSpace(m.exactAmount) == "" {
+		return ""
+	}
+	return fmt.Sprintf("selected %s exact: %s %s", m.provider, m.exactAmount, m.amountTicker)
+}
+
+func formatQuoteAmount(raw, ticker string) string {
+	return compactAmountDisplay(formatQuoteAmountExact(raw, ticker))
+}
+
+func formatQuoteAmountExact(raw, ticker string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	if strings.Contains(raw, ".") {
+		return raw
+	}
+
+	decimals, ok := tokenDecimals(strings.ToUpper(strings.TrimSpace(ticker)))
+	if !ok {
+		return raw
+	}
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return raw
+		}
+	}
+
+	if decimals <= 0 {
+		return raw
+	}
+	if len(raw) <= decimals {
+		frac := strings.Repeat("0", decimals-len(raw)) + raw
+		frac = strings.TrimRight(frac, "0")
+		if frac == "" {
+			return "0"
+		}
+		return "0." + frac
+	}
+
+	intPart := raw[:len(raw)-decimals]
+	fracPart := strings.TrimRight(raw[len(raw)-decimals:], "0")
+	if fracPart == "" {
+		return intPart
+	}
+	return intPart + "." + fracPart
+}
+
+func compactAmountDisplay(v string) string {
+	v = strings.TrimSpace(v)
+	const maxLen = 12
+	if len(v) <= maxLen {
+		return v
+	}
+
+	if !strings.Contains(v, ".") {
+		return v[:maxLen-1] + "+"
+	}
+
+	parts := strings.SplitN(v, ".", 2)
+	intPart := parts[0]
+	fracPart := parts[1]
+
+	if len(intPart) >= maxLen {
+		return intPart[:maxLen-1] + "+"
+	}
+
+	fracKeep := maxLen - len(intPart) - 1
+	if fracKeep <= 0 {
+		return intPart
+	}
+	if len(fracPart) > fracKeep {
+		fracPart = fracPart[:fracKeep]
+	}
+	fracPart = strings.TrimRight(fracPart, "0")
+	if fracPart == "" {
+		return intPart
+	}
+	return intPart + "." + fracPart
+}
+
+func tokenDecimals(ticker string) (int, bool) {
+	switch ticker {
+	case "ETH", "DAI":
+		return 18, true
+	case "USDC", "USDT":
+		return 6, true
+	case "BTC", "WBTC":
+		return 8, true
+	default:
+		return 0, false
+	}
+}
+
+func parseUSDValue(raw string) float64 {
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func computeSpreadPercentsByBest(quotes []*pb.QuoteDetails, payment bool) []string {
+	out := make([]string, len(quotes))
+	if len(quotes) == 0 {
+		return out
+	}
+
+	ref := quoteComparableAmount(quotes[0], payment)
+
+	for i, q := range quotes {
+		v := quoteComparableAmount(q, payment)
+		pct := 0.0
+		if ref > 0 {
+			if payment {
+				pct = ((v - ref) / ref) * 100
+			} else {
+				pct = ((ref - v) / ref) * 100
+			}
+		}
+		if pct < 0 {
+			pct = 0
+		}
+		if math.IsNaN(pct) || math.IsInf(pct, 0) {
+			pct = 0
+		}
+		out[i] = fmt.Sprintf("%.2f%%", pct)
+	}
+
+	return out
+}
+
+func quoteComparableAmount(q *pb.QuoteDetails, payment bool) float64 {
+	if q == nil {
+		return 0
+	}
+	var raw string
+	if payment {
+		raw = q.GetAmountFrom()
+	} else {
+		raw = q.GetAmountTo()
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }

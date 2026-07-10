@@ -24,7 +24,7 @@ func (h Help) Update(msg tea.Msg) (Help, tea.Cmd) {
 }
 
 func (h Help) View() string {
-	text := "↑/↓ navigate • enter select • / search • esc cancel • tab swap/pay • q quit"
+	text := "↑/↓ navigate • enter select • / search • w warnings on/off • esc cancel • tab swap/pay • q quit"
 	return lipgloss.NewStyle().
 		Padding(0, 1).
 		Foreground(h.color).

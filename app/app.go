@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -43,8 +44,13 @@ type SwapUI struct {
 	help Help
 	log  Log
 
-	sp       spinner.Model
-	spinning bool
+	sp                 spinner.Model
+	spinning           bool
+	statusNote         string
+	usdPriceBadge      string
+	showWarningDetails bool
+	selectedRateNote   string
+	rateWarnings       []string
 
 	pg progress.Model
 }
@@ -63,6 +69,14 @@ type CoinData struct {
 }
 
 func NewTSwapUI(cfg *Config, api APIClient, debug bool) *SwapUI {
+	showWarningDetails := true
+	if cfg != nil {
+		showWarningDetails = cfg.GetShowWarningDetails(true)
+	}
+	if envShow, ok := parseBoolEnv("SWAP_UI_SHOW_WARNING_DETAILS"); ok {
+		showWarningDetails = envShow
+	}
+
 	m := &SwapUI{
 		state: &AppState{},
 		api:   api,
@@ -71,8 +85,9 @@ func NewTSwapUI(cfg *Config, api APIClient, debug bool) *SwapUI {
 
 		table: NewSwapTable(api),
 
-		spinning: true,
-		sp:       spinner.New(spinner.WithSpinner(spinner.Dot)),
+		spinning:           true,
+		sp:                 spinner.New(spinner.WithSpinner(spinner.Dot)),
+		showWarningDetails: showWarningDetails,
 		pg: progress.New(
 			progress.WithWidth(25),
 			progress.WithDefaultGradient(),
@@ -161,6 +176,14 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.pg.DecrPercent(0.01))
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "w":
+			m.toggleWarningDetails()
+			if m.cfg != nil {
+				if err := m.cfg.SetShowWarningDetails(m.showWarningDetails); err != nil {
+					cmds = append(cmds, AddLog("warning details persist error: %v", err))
+				}
+			}
+			cmds = append(cmds, AddLog("warning details: %v", m.showWarningDetails))
 		case "tab":
 			if m.state.Current() >= InputAddress {
 				return m, AddError(fmt.Errorf("cannot change swap/pay at this point: press esc"))
@@ -199,6 +222,9 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// cmds = append(cmds, AddLog("state: %v, key: %v", m.state.Current(), msg.String()))
 			m.table, cmd = m.table.Update(msg)
 			cmds = append(cmds, cmd)
+			if m.state.IsAt(RateTable) {
+				m.selectedRateNote = m.table.SelectedRateDetail()
+			}
 		}
 
 		if m.state.IsAt(CoinTable) {
@@ -262,6 +288,8 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 
 			case "enter":
+				m.statusNote = ""
+				m.rateWarnings = nil
 				//-- validation of min/max dex requirements
 				fval := parseFloat(m.cd.Amount.Value())
 				min := m.cd.From.Minimum
@@ -307,6 +335,7 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				m.table.rateTable.SetRows(nil) // clear rate table
 				m.cd.Exchange = ""
+				m.selectedRateNote = ""
 				m.table.state = CoinTableState // todo(leo): refactor
 				m.state.GoTo(InputAmount)
 				cmds = append(cmds, m.table.Init())
@@ -448,10 +477,18 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SwapRateRespMsg:
 		m.cd.TradeID = msg.Resp.GetTradeId()
+		m.rateWarnings = normalizeProviderWarnings(msg.Warnings)
+		m.usdPriceBadge = deriveUSDPriceBadge(m.rateWarnings)
+		if len(m.rateWarnings) > 0 {
+			m.statusNote = "provider warnings: " + strings.Join(m.rateWarnings, " | ")
+		} else {
+			m.statusNote = ""
+		}
 		m.table.state = RateTableState
 		m.table.Focus()
 		m.table, cmd = m.table.Update(msg)
 		cmds = append(cmds, cmd)
+		m.selectedRateNote = m.table.SelectedRateDetail()
 		cmds = append(cmds, AddLog("main: swap rate success"))
 		cmds = append(cmds, m.SetSpinning(false))
 		m.state.GoTo(RateTable)
@@ -472,6 +509,10 @@ func (m *SwapUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case ErrorMsg:
+		m.statusNote = ""
+		m.usdPriceBadge = ""
+		m.selectedRateNote = ""
+		m.rateWarnings = nil
 		m.log, cmd = m.log.Update(msg)
 		cmds = append(cmds, cmd)
 		cmds = append(cmds, m.SetSpinning(false))
@@ -497,8 +538,107 @@ func (m *SwapUI) resetCoinData() tea.Cmd {
 
 		m.cd.Exchange = ""
 		m.cd.Payment = false
+		m.statusNote = ""
+		m.usdPriceBadge = ""
+		m.selectedRateNote = ""
+		m.rateWarnings = nil
 		return AddLog("main: coin data reset")
 	}
+}
+
+func deriveUSDPriceBadge(warnings []string) string {
+	for _, w := range warnings {
+		lw := strings.ToLower(strings.TrimSpace(w))
+		if strings.HasPrefix(lw, "usd prices:") {
+			if i := strings.Index(lw, "("); i >= 0 {
+				j := strings.Index(lw[i:], ")")
+				if j > 1 {
+					age := strings.TrimSpace(lw[i+1 : i+j])
+					if age != "" {
+						return fmt.Sprintf("USD: cached %s", age)
+					}
+				}
+			}
+			return "USD: cached"
+		}
+	}
+	if len(warnings) == 0 {
+		return "USD: fresh"
+	}
+	return "USD: fresh"
+}
+
+func normalizeProviderWarnings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	seen := make(map[string]struct{}, len(in))
+	for _, raw := range in {
+		w := summarizeProviderWarning(raw)
+		if w == "" {
+			continue
+		}
+		if shouldSuppressProviderWarning(w) {
+			continue
+		}
+		if _, ok := seen[w]; ok {
+			continue
+		}
+		seen[w] = struct{}{}
+		out = append(out, w)
+	}
+	if len(out) > 3 {
+		return out[:3]
+	}
+	return out
+}
+
+func summarizeProviderWarning(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "usd prices:") {
+		return raw
+	}
+	provider := "provider"
+	reason := raw
+	if idx := strings.Index(raw, " unavailable:"); idx > 0 {
+		provider = strings.TrimSpace(raw[:idx])
+		reason = strings.TrimSpace(raw[idx+len(" unavailable:"):])
+	} else if idx := strings.Index(raw, ":"); idx > 0 {
+		provider = strings.TrimSpace(raw[:idx])
+		reason = strings.TrimSpace(raw[idx+1:])
+	}
+
+	r := strings.ToLower(reason)
+	kind := "unavailable"
+	switch {
+	case strings.Contains(r, "timeout") || strings.Contains(r, "deadline exceeded"):
+		kind = "timeout"
+	case strings.Contains(r, "circuit open"):
+		kind = "circuit-open"
+	case strings.Contains(r, "non-json") || strings.Contains(r, "content_type=\"text/html") || strings.Contains(r, "invalid character '<'"):
+		kind = "upstream-html"
+	case strings.Contains(r, "requires swap_0x_api_key") || strings.Contains(r, "api key"):
+		kind = "auth"
+	case strings.Contains(r, "unsupported"):
+		kind = "unsupported"
+	case strings.Contains(r, "error 5"):
+		kind = "upstream-5xx"
+	case strings.Contains(r, "error 4"):
+		kind = "upstream-4xx"
+	}
+
+	if provider == "" {
+		provider = "provider"
+	}
+	return fmt.Sprintf("%s:%s", provider, kind)
+}
+
+func shouldSuppressProviderWarning(w string) bool {
+	return strings.HasSuffix(w, ":upstream-html") || strings.HasSuffix(w, ":unavailable")
 }
 
 func tiAddress() textinput.Model {
@@ -564,4 +704,31 @@ func (m *SwapUI) SetSpinning(enabled bool) tea.Cmd {
 		return m.sp.Tick
 	}
 	return nil
+}
+
+func (m *SwapUI) toggleWarningDetails() {
+	m.showWarningDetails = !m.showWarningDetails
+}
+
+func (m *SwapUI) warningDetailsLabel() string {
+	if m.showWarningDetails {
+		return "Warnings: ON"
+	}
+	return "Warnings: OFF"
+}
+
+func parseBoolEnv(key string) (bool, bool) {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false
+	}
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off", "":
+		return false, true
+	default:
+		return false, false
+	}
 }

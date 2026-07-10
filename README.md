@@ -72,14 +72,125 @@ git clone https://github.com/lfaoro/swap.git \
   && bin/swap
 ```
 
+### Local Dev (One Command)
+
+To run both the local HTTP API and TUI in one command:
+
+```bash
+cd swap
+SWAP_0X_API_KEY=your_key_here make run-dev
+```
+
+If `make` is unavailable in your environment, use the script directly:
+
+```bash
+cd swap
+chmod +x misc/run-dev.sh
+SWAP_0X_API_KEY=your_key_here ./misc/run-dev.sh
+```
+
+When running `misc/run-dev.sh`, explicit environment variables on the command line override values in `.env`.
+
+You can also keep TUI command-line flags in `.env` so local runs stay consistent without typing flags each time:
+
+- `SWAP_DEBUG=1` → same as `swap --debug`
+- `SWAP_NO_LOGS=1` → same as `swap --no-logs`
+- `SWAP_LEGAL=1` → same as `swap --legal`
+- `SWAP_UI_SHOW_WARNING_DETAILS=0|1` → sets initial warnings detail mode in UI
+
+For quote providers, you can aggregate multiple built-ins and multiple external adapters in one run:
+
+- Default: `SWAP_QUOTE_PROVIDER=0x,1inch,paraswap,openocean,odos` aggregates five quote sources.
+- `SWAP_QUOTE_PROVIDER=0x,paraswap,external:foo,external:bar`
+- `SWAP_QUOTE_URL_FOO=https://your-foo-adapter.example`
+- `SWAP_QUOTE_API_KEY_FOO=<optional>`
+- `SWAP_QUOTE_PATH_FOO=/quote` (optional; fallback to `SWAP_QUOTE_PATH`, then `/quote`)
+- `SWAP_QUOTE_TIMEOUT_MS_FOO=15000` (optional; fallback to `SWAP_QUOTE_TIMEOUT_MS`, then 15000)
+- `SWAP_QUOTE_CIRCUIT_FAILS_FOO=3` (optional; fallback to `SWAP_QUOTE_CIRCUIT_FAILS`, then 3)
+- `SWAP_QUOTE_CIRCUIT_COOLDOWN_MS_FOO=30000` (optional; fallback to global, then 30000)
+- `SWAP_QUOTE_URL_BAR=https://your-bar-adapter.example`
+- `SWAP_QUOTE_API_KEY_BAR=<optional>`
+- `SWAP_QUOTE_PATH_BAR=/quote` (optional; fallback to `SWAP_QUOTE_PATH`, then `/quote`)
+- `SWAP_QUOTE_TIMEOUT_MS_BAR=15000` (optional; fallback to `SWAP_QUOTE_TIMEOUT_MS`, then 15000)
+- `SWAP_QUOTE_CIRCUIT_FAILS_BAR=3` (optional; fallback to `SWAP_QUOTE_CIRCUIT_FAILS`, then 3)
+- `SWAP_QUOTE_CIRCUIT_COOLDOWN_MS_BAR=30000` (optional; fallback to global, then 30000)
+
+Global external defaults:
+
+- `SWAP_QUOTE_PATH=/quote`
+- `SWAP_QUOTE_TIMEOUT_MS=15000`
+- `SWAP_QUOTE_CIRCUIT_FAILS=3`
+- `SWAP_QUOTE_CIRCUIT_COOLDOWN_MS=30000`
+
+OpenOcean settings:
+
+- `SWAP_OPENOCEAN_URL=https://open-api.openocean.finance/v3`
+- `SWAP_OPENOCEAN_CHAIN_ID=1`
+- `SWAP_OPENOCEAN_TIMEOUT_MS=15000`
+
+Odos settings:
+
+- `SWAP_ODOS_URL=https://api.odos.ai`
+- `SWAP_ODOS_CHAIN_ID=1`
+- `SWAP_ODOS_TIMEOUT_MS=15000`
+
+Circuit behavior: after cooldown, one half-open probe request is allowed. If it succeeds, the provider closes and resumes; if it fails, the circuit reopens immediately.
+
+Alias names in `external:<alias>` map to env suffixes by uppercasing and replacing `-` with `_`.
+
+Additionally, `SWAP_DEBUG=1` enables extra backend trace logs in `httpapi` for canceled/timeout quote branches that are intentionally suppressed in normal mode.
+These traces include request fields (`from`, `to`, `amount_from`, `chain_id`, `network_from`, `network_to`) to speed up troubleshooting.
+`httpapi` now tags swaprate-related logs with a per-request `request_id` so you can correlate handler and multi-provider log lines for the same request.
+The `/v1/swaprate` endpoint also returns this value in the `X-Request-Id` response header so client-side errors can be matched to backend logs quickly.
+
+At startup, `misc/run-dev.sh` prints the effective TUI env flags (`debug`, `no_logs`, `legal`, `warnings_detail`) so you can quickly verify what is active.
+It also prints the `.env` source path and counters (`loaded` and `overridden`) to show how many keys came from `.env` vs pre-set shell variables.
+Set `SWAP_ENV_DEBUG=1` to additionally print key names loaded from `.env` and key names overridden by your shell.
+When `SWAP_SKIP_TUI=1`, if `httpapi` exits with a non-zero code, `run-dev.sh` now prints the exit code and tails the API log automatically.
+
+If port `8081` is already occupied by an old local backend process, force-restart it:
+
+```bash
+cd swap
+SWAP_FORCE_KILL_PORT=1 SWAP_0X_API_KEY=your_key_here ./misc/run-dev.sh
+```
+
+The script now runs a quote self-check before launching the TUI.
+You can disable it with:
+
+```bash
+SWAP_SELF_CHECK=0 ./misc/run-dev.sh
+```
+
+To require at least N distinct providers in self-check results:
+
+```bash
+SWAP_SELF_CHECK_MIN_PROVIDERS=2 ./misc/run-dev.sh
+```
+
+For backend-only diagnostics (start API + self-check, skip TUI):
+
+```bash
+SWAP_SKIP_TUI=1 ./misc/run-dev.sh
+```
+
+What `make run-dev` does:
+
+- starts `cmd/httpapi`
+- waits for `http://127.0.0.1:8081/healthz`
+- runs a `POST /v1/swaprate` self-check (configurable via `SWAP_SELF_CHECK_*`)
+- starts `cmd/swap` with `SWAP_API_URL=http://127.0.0.1:8081`
+- stops the API process automatically when the TUI exits
+
 ## HTTP API Environment Variables
 
-The `swap` backend supports a local HTTP API for quote providers. You can run a single provider or aggregate multiple providers concurrently (e.g. `0x,1inch`).
+The `swap` backend supports a local HTTP API for quote providers. You can run a single provider or aggregate multiple providers concurrently (e.g. `0x,paraswap`).
 
 - `SWAP_QUOTE_PROVIDER=0x` — single provider mode (0x only).
-- `SWAP_QUOTE_PROVIDER=0x,1inch` — multi-provider aggregation mode (also supports `0x+1inch`, `0x;1inch`, or space-separated values).
+- `SWAP_QUOTE_PROVIDER=0x,paraswap` — multi-provider aggregation mode (also supports `0x+paraswap`, `0x;paraswap`, or space-separated values).
 - `SWAP_0X_API_KEY=<your-0x-api-key>` — required for 0x Permit2 quote endpoints.
 - `SWAP_0X_CHAIN_ID=1|10|137|42161|56|8453|43114` — supported chain IDs. Default is `1`.
+- `SWAP_PARASWAP_CHAIN_ID=1|10|137|42161|56|8453|43114` — ParaSwap chain ID. Default is `1`.
   - `1` → Ethereum Mainnet
   - `10` → Optimism
   - `137` → Polygon
@@ -91,13 +202,22 @@ The `swap` backend supports a local HTTP API for quote providers. You can run a 
   - Default: `0x0000000000000000000000000000000000010000`
 - `SWAP_COINS_SOURCE=coingecko|static` — source for `/v1/coins`.
   - Default: `coingecko` (dynamic list fetched from CoinGecko)
-  - `static` uses the built-in fallback list
+    - supported tickers are expanded into provider-supported network variants (for example `Bitcoin (Optimism)`, `Ethereum (Base)`)
+  - `static` uses the built-in fallback list (multi-network BTC/ETH/USDC/USDT/DAI)
 - `SWAP_COINS_LIMIT=1..250` — number of coins fetched from CoinGecko.
   - Default: `100`
 - `SWAP_COINS_CACHE_TTL=<duration>` — in-memory cache TTL for coin list.
   - Default: `10m` (examples: `30s`, `5m`, `1h`)
+- `SWAP_SELF_CHECK_MIN_PROVIDERS=<n>` — minimum number of distinct providers expected in the startup self-check result.
+  - Default: `1`
 - `chain_id` — optional request body field for `/v1/swaprate` that overrides `SWAP_0X_CHAIN_ID` when using 0x.
 - `taker` — optional request body field for `/v1/swaprate` to override the `SWAP_0X_TAKER` address for Permit2 quotes. Must be a valid 0x-style address (0x... with 40 hex chars).
+
+Network-aware quoting note:
+
+- If `chain_id` is omitted, `/v1/swaprate` derives chain from `network_from`/`network_to` when possible.
+- For onchain providers (0x/1inch/paraswap), unknown networks (for example `SOL`) are rejected instead of silently falling back to default EVM chain.
+- Unknown-network errors now include supported network names and suggest passing `chain_id` explicitly.
 
 Polygon mapping note:
 
@@ -127,9 +247,10 @@ SWAP_QUOTE_PROVIDER=0x \
 Multi-provider aggregation example:
 
 ```bash
-SWAP_QUOTE_PROVIDER=0x,1inch \
+SWAP_QUOTE_PROVIDER=0x,paraswap \
   SWAP_0X_API_KEY=your_key_here \
   SWAP_0X_CHAIN_ID=1 \
+  SWAP_PARASWAP_CHAIN_ID=1 \
   SWAP_0X_TAKER=0x0000000000000000000000000000000000010000 \
   go run ./cmd/httpapi
 ```

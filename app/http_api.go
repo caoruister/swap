@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,6 +22,9 @@ type HTTPSwapAPI struct {
 	client *http.Client
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	mu         sync.Mutex
+	streamBody io.ReadCloser
 }
 
 func NewHTTPSwapAPI(baseURL string) APIClient {
@@ -34,7 +38,44 @@ func NewHTTPSwapAPI(baseURL string) APIClient {
 }
 
 func (h *HTTPSwapAPI) Close() {
-	h.cancel()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.cancel != nil {
+		h.cancel()
+	}
+	if h.streamBody != nil {
+		_ = h.streamBody.Close()
+		h.streamBody = nil
+	}
+
+	// Keep the client reusable after cancelling a running stream.
+	h.ctx, h.cancel = context.WithCancel(context.Background())
+}
+
+func (h *HTTPSwapAPI) currentContext() context.Context {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ctx
+}
+
+func (h *HTTPSwapAPI) setActiveStreamBody(body io.ReadCloser) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.streamBody != nil {
+		_ = h.streamBody.Close()
+	}
+	h.streamBody = body
+}
+
+func (h *HTTPSwapAPI) clearActiveStreamBody(body io.ReadCloser) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.streamBody == body {
+		h.streamBody = nil
+	}
 }
 
 func (h *HTTPSwapAPI) url(path string) string {
@@ -53,6 +94,18 @@ func (h *HTTPSwapAPI) ListCoins() tea.Cmd {
 			)()
 		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(resp.Body)
+			body := strings.TrimSpace(string(data))
+			if body == "" {
+				body = resp.Status
+			}
+			return tea.Batch(
+				AddLog("http api: listcoins non-200 (%d): %s", resp.StatusCode, body),
+				AddError(fmt.Errorf("coins request failed (%d): %s", resp.StatusCode, body)),
+			)()
+		}
 
 		var body struct {
 			Coins []struct {
@@ -124,8 +177,9 @@ func (h *HTTPSwapAPI) SwapRate(req SwapRateReqMsg) tea.Cmd {
 		}
 
 		var jr struct {
-			TickerFrom string `json:"ticker_from"`
-			TickerTo   string `json:"ticker_to"`
+			TickerFrom string   `json:"ticker_from"`
+			TickerTo   string   `json:"ticker_to"`
+			Warnings   []string `json:"warnings"`
 			Quotes     []struct {
 				Provider       string  `json:"provider"`
 				AmountTo       string  `json:"amount_to"`
@@ -167,7 +221,7 @@ func (h *HTTPSwapAPI) SwapRate(req SwapRateReqMsg) tea.Cmd {
 
 		return tea.Batch(
 			AddLog("http api: success (SwapRate)"),
-			func() tea.Msg { return SwapRateRespMsg{Resp: out} },
+			func() tea.Msg { return SwapRateRespMsg{Resp: out, Warnings: jr.Warnings} },
 		)()
 	}
 }
@@ -197,6 +251,18 @@ func (h *HTTPSwapAPI) SwapTrade(req SwapTradeReq) tea.Cmd {
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(resp.Body)
+			body := strings.TrimSpace(string(data))
+			if body == "" {
+				body = resp.Status
+			}
+			return tea.Batch(
+				AddLog("http api: swaptrade non-200 (%d): %s", resp.StatusCode, body),
+				AddError(fmt.Errorf("swaptrade failed (%d): %s", resp.StatusCode, body)),
+			)()
+		}
+
 		var jr struct {
 			Status  string `json:"status"`
 			TradeId string `json:"trade_id"`
@@ -220,13 +286,23 @@ func (h *HTTPSwapAPI) SwapStatus(req SwapStatusReqMsg) tea.Cmd {
 	return func() tea.Msg {
 		// Connect to stream
 		streamURL := h.url("/v1/swapstatus/stream") + "?tradeid=" + url.QueryEscape(req.TradeID)
-		r, err := h.client.Get(streamURL)
+		streamCtx := h.currentContext()
+		httpReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
+		if err != nil {
+			return tea.Batch(
+				AddLog("http api: error (SwapStatus request): %v", err),
+				AddError(err),
+			)()
+		}
+
+		r, err := h.client.Do(httpReq)
 		if err != nil {
 			return tea.Batch(
 				AddLog("http api: error (SwapStatus connect): %v", err),
 				AddError(err),
 			)()
 		}
+		h.setActiveStreamBody(r.Body)
 
 		decoder := json.NewDecoder(r.Body)
 
@@ -254,10 +330,12 @@ func (h *HTTPSwapAPI) SwapStatus(req SwapStatusReqMsg) tea.Cmd {
 			if err := decoder.Decode(&jr); err != nil {
 				if err == io.EOF {
 					_ = r.Body.Close()
+					h.clearActiveStreamBody(r.Body)
 					return nil
 				}
 				_ = r.Body.Close()
-				if h.ctx.Err() != nil {
+				h.clearActiveStreamBody(r.Body)
+				if streamCtx.Err() != nil {
 					return nil
 				}
 				return tea.Batch(

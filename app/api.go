@@ -61,7 +61,8 @@ type SwapRateReqMsg struct {
 	Payment     bool
 }
 type SwapRateRespMsg struct {
-	Resp *pb.SwapRateResponse
+	Resp     *pb.SwapRateResponse
+	Warnings []string
 }
 
 func (s SwapAPI) SwapRate(req SwapRateReqMsg) tea.Cmd {

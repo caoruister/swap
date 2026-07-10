@@ -1,15 +1,67 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+type requestIDCapturingProvider struct {
+	gotID string
+}
+
+func TestOneInchGetQuotes_NonJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html><body>blocked</body></html>"))
+	}))
+	defer srv.Close()
+
+	p := &OneInchQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "BTC",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected non-json error, got nil")
+	}
+	errText := strings.ToLower(err.Error())
+	if !strings.Contains(errText, "non-json response") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(errText, "status=200") {
+		t.Fatalf("expected status details in error, got: %v", err)
+	}
+	if !strings.Contains(errText, "content_type=\"text/html\"") {
+		t.Fatalf("expected content-type details in error, got: %v", err)
+	}
+}
+func (p *requestIDCapturingProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, []string, error) {
+	p.gotID = requestIDFromContext(ctx)
+	return []Quote{{Provider: "capture", AmountTo: "1"}}, nil, nil
+}
+
+type failingQuoteProvider struct{}
+
+func (failingQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, []string, error) {
+	return nil, nil, errors.New("upstream failed")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -91,6 +143,111 @@ func TestWrappedETHAddress(t *testing.T) {
 	}
 }
 
+func TestIsDebugEnabled(t *testing.T) {
+	t.Setenv("SWAP_DEBUG", "1")
+	if !isDebugEnabled() {
+		t.Fatal("expected SWAP_DEBUG=1 to enable debug")
+	}
+
+	t.Setenv("SWAP_DEBUG", "true")
+	if !isDebugEnabled() {
+		t.Fatal("expected SWAP_DEBUG=true to enable debug")
+	}
+
+	t.Setenv("SWAP_DEBUG", "on")
+	if !isDebugEnabled() {
+		t.Fatal("expected SWAP_DEBUG=on to enable debug")
+	}
+
+	t.Setenv("SWAP_DEBUG", "0")
+	if isDebugEnabled() {
+		t.Fatal("expected SWAP_DEBUG=0 to disable debug")
+	}
+
+	t.Setenv("SWAP_DEBUG", "")
+	if isDebugEnabled() {
+		t.Fatal("expected empty SWAP_DEBUG to disable debug")
+	}
+}
+
+func TestQuoteRequestDebugFields(t *testing.T) {
+	req := SwapRateRequest{
+		TickerFrom:  " BTC ",
+		TickerTo:    " USDT ",
+		AmountFrom:  " 1.25 ",
+		ChainID:     " 1 ",
+		NetworkFrom: " Mainnet ",
+		NetworkTo:   " Arbitrum One ",
+	}
+
+	got := quoteRequestDebugFields(req)
+	want := "from=BTC to=USDT amount_from=1.25 chain_id=1 network_from=Mainnet network_to=Arbitrum One"
+	if got != want {
+		t.Fatalf("quoteRequestDebugFields() = %q, want %q", got, want)
+	}
+}
+
+func TestNewRequestIDFormat(t *testing.T) {
+	id := newRequestID()
+	if !strings.HasPrefix(id, "RQ-") {
+		t.Fatalf("newRequestID() prefix mismatch: %q", id)
+	}
+	if len(id) != 15 {
+		t.Fatalf("newRequestID() length=%d, want 15", len(id))
+	}
+}
+
+func TestRequestIDContextRoundTrip(t *testing.T) {
+	ctx := withRequestID(context.Background(), "RQ-abc123")
+	if got := requestIDFromContext(ctx); got != "RQ-abc123" {
+		t.Fatalf("requestIDFromContext() = %q, want RQ-abc123", got)
+	}
+}
+
+func TestSwapRateHandler_AttachesRequestIDToContext(t *testing.T) {
+	orig := quoteProvider
+	cp := &requestIDCapturingProvider{}
+	quoteProvider = cp
+	defer func() { quoteProvider = orig }()
+
+	body := bytes.NewBufferString(`{"ticker_from":"BTC","ticker_to":"USDT","amount_from":"1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/swaprate", body)
+	w := httptest.NewRecorder()
+
+	swapRateHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("X-Request-Id"); !strings.HasPrefix(got, "RQ-") {
+		t.Fatalf("expected X-Request-Id header with RQ- prefix, got %q", got)
+	}
+	if !strings.HasPrefix(cp.gotID, "RQ-") {
+		t.Fatalf("expected propagated request id prefix RQ-, got %q", cp.gotID)
+	}
+}
+
+func TestSwapRateHandler_ErrorPath_IncludesRequestIDHeader(t *testing.T) {
+	orig := quoteProvider
+	quoteProvider = failingQuoteProvider{}
+	defer func() { quoteProvider = orig }()
+
+	body := bytes.NewBufferString(`{"ticker_from":"BTC","ticker_to":"USDT","amount_from":"1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/swaprate", body)
+	w := httptest.NewRecorder()
+
+	swapRateHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if got := resp.Header.Get("X-Request-Id"); !strings.HasPrefix(got, "RQ-") {
+		t.Fatalf("expected X-Request-Id header with RQ- prefix, got %q", got)
+	}
+}
+
 func TestZeroXTokenAddress(t *testing.T) {
 	type tc struct {
 		chain, sym string
@@ -156,18 +313,18 @@ type stubQuoteProvider struct {
 	err    error
 }
 
-func (s stubQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, error) {
+func (s stubQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, []string, error) {
 	if s.delay > 0 {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-time.After(s.delay):
 		}
 	}
 	if s.err != nil {
-		return nil, s.err
+		return nil, nil, s.err
 	}
-	return s.quotes, nil
+	return s.quotes, nil, nil
 }
 
 func TestParseProviderList(t *testing.T) {
@@ -177,6 +334,8 @@ func TestParseProviderList(t *testing.T) {
 		want []string
 	}{
 		{name: "comma", raw: "0x,1inch", want: []string{"0x", "1inch"}},
+		{name: "comma with paraswap", raw: "0x,paraswap", want: []string{"0x", "paraswap"}},
+		{name: "external aliases", raw: "0x,external:foo,external:bar", want: []string{"0x", "external:foo", "external:bar"}},
 		{name: "plus", raw: "0x+1inch", want: []string{"0x", "1inch"}},
 		{name: "space and duplicate", raw: "0x 1inch 0x", want: []string{"0x", "1inch"}},
 		{name: "empty becomes mock", raw: "", want: []string{"mock"}},
@@ -194,6 +353,128 @@ func TestParseProviderList(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestChainIDFromNetwork(t *testing.T) {
+	tests := []struct {
+		name    string
+		network string
+		want    string
+		ok      bool
+	}{
+		{name: "optimism", network: "Optimism", want: "10", ok: true},
+		{name: "bep20", network: "BEP20", want: "56", ok: true},
+		{name: "arbitrum", network: "Arbitrum One", want: "42161", ok: true},
+		{name: "base", network: "base", want: "8453", ok: true},
+		{name: "unknown", network: "Lightning", want: "", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := chainIDFromNetwork(tt.network)
+			if ok != tt.ok || got != tt.want {
+				t.Fatalf("chainIDFromNetwork(%q)=(%q,%v) want=(%q,%v)", tt.network, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestResolveChainIDUsesNetworkWhenMissingChainID(t *testing.T) {
+	req := SwapRateRequest{NetworkFrom: "Optimism", NetworkTo: "Mainnet"}
+	if got := resolveChainID(req, "1"); got != "10" {
+		t.Fatalf("resolveChainID()=%q want=%q", got, "10")
+	}
+
+	req = SwapRateRequest{NetworkFrom: "", NetworkTo: "Base"}
+	if got := resolveChainID(req, "1"); got != "8453" {
+		t.Fatalf("resolveChainID()=%q want=%q", got, "8453")
+	}
+
+	req = SwapRateRequest{ChainID: "42161", NetworkFrom: "Optimism"}
+	if got := resolveChainID(req, "1"); got != "42161" {
+		t.Fatalf("resolveChainID()=%q want explicit=%q", got, "42161")
+	}
+}
+
+func TestIsCoinSupportedByActiveProvidersUsesNetworkChain(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_PROVIDER", "0x")
+	t.Setenv("SWAP_0X_CHAIN_ID", "1")
+
+	if !isCoinSupportedByActiveProviders(Coin{Ticker: "btc", Network: "Optimism"}) {
+		t.Fatalf("btc on Optimism should be supported via WBTC mapping on chain 10")
+	}
+	if isCoinSupportedByActiveProviders(Coin{Ticker: "xmr", Network: "Optimism"}) {
+		t.Fatalf("xmr on Optimism should not be supported by 0x token map")
+	}
+	if isCoinSupportedByActiveProviders(Coin{Ticker: "btc", Network: "SOL"}) {
+		t.Fatalf("btc on unsupported SOL network should not be supported by onchain providers")
+	}
+}
+
+func TestResolveOnchainChainID(t *testing.T) {
+	got, err := resolveOnchainChainID(SwapRateRequest{NetworkFrom: "Optimism"}, "1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "10" {
+		t.Fatalf("resolveOnchainChainID Optimism=%q want=10", got)
+	}
+
+	_, err = resolveOnchainChainID(SwapRateRequest{NetworkFrom: "SOL"}, "1")
+	if err == nil {
+		t.Fatalf("expected error for unsupported network_from")
+	}
+	if !strings.Contains(err.Error(), "supported networks") || !strings.Contains(err.Error(), "chain_id") {
+		t.Fatalf("unsupported network error should include guidance, got: %v", err)
+	}
+
+	got, err = resolveOnchainChainID(SwapRateRequest{}, "1")
+	if err != nil || got != "1" {
+		t.Fatalf("resolveOnchainChainID fallback=(%q,%v) want=(1,nil)", got, err)
+	}
+}
+
+func TestSupportedNetworksForTickerByActiveProviders(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_PROVIDER", "0x,paraswap")
+
+	networks := supportedNetworksForTickerByActiveProviders("btc")
+	if len(networks) < 5 {
+		t.Fatalf("expected multiple btc networks, got=%v", networks)
+	}
+
+	networks = supportedNetworksForTickerByActiveProviders("xmr")
+	if len(networks) != 0 {
+		t.Fatalf("xmr should not be supported by onchain providers, got=%v", networks)
+	}
+}
+
+func TestExpandCoinAcrossSupportedNetworks(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_PROVIDER", "0x")
+
+	coins := expandCoinAcrossSupportedNetworks("Bitcoin", "btc")
+	if len(coins) == 0 {
+		t.Fatalf("expected expanded coins for btc")
+	}
+	if coins[0].Ticker != "btc" {
+		t.Fatalf("unexpected ticker in first coin: %s", coins[0].Ticker)
+	}
+	if coins[0].Minimum <= 0 || coins[0].Maximum <= 0 {
+		t.Fatalf("unexpected limits in expanded coin: %+v", coins[0])
+	}
+
+	var hasMainnet bool
+	var hasOptimism bool
+	for _, c := range coins {
+		if c.Network == "Mainnet" && c.Name == "Bitcoin" {
+			hasMainnet = true
+		}
+		if c.Network == "Optimism" && strings.Contains(c.Name, "(Optimism)") {
+			hasOptimism = true
+		}
+	}
+	if !hasMainnet || !hasOptimism {
+		t.Fatalf("expected mainnet and optimism name variants, got=%v", coins)
 	}
 }
 
@@ -224,11 +505,14 @@ func TestMultiQuoteProvider_AggregatesSortsAndToleratesFailure(t *testing.T) {
 	}}
 
 	start := time.Now()
-	quotes, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
+	quotes, warnings, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
 	elapsed := time.Since(start)
 
 	if err != nil {
 		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings for partial failure, got none")
 	}
 	if len(quotes) != 2 {
 		t.Fatalf("GetQuotes returned %d quotes, want 2", len(quotes))
@@ -250,9 +534,64 @@ func TestMultiQuoteProvider_AllFail(t *testing.T) {
 		{name: "1inch", provider: stubQuoteProvider{err: errors.New("1inch down")}},
 	}}
 
-	quotes, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
+	quotes, warnings, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
 	if err == nil {
 		t.Fatalf("expected error when all providers fail, got nil with quotes=%v", quotes)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected warnings when all providers fail")
+	}
+}
+
+func TestMultiQuoteProvider_IgnoreCancellationPartialFailure(t *testing.T) {
+	mp := &MultiQuoteProvider{providers: []namedQuoteProvider{
+		{
+			name: "0x",
+			provider: stubQuoteProvider{
+				quotes: []Quote{{Provider: "0x", AmountTo: "123"}},
+			},
+		},
+		{name: "paraswap", provider: stubQuoteProvider{err: context.Canceled}},
+	}}
+
+	quotes, warnings, err := mp.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "ETH", TickerTo: "USDC", AmountFrom: "0.1"})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("GetQuotes returned %d quotes, want 1", len(quotes))
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings for cancellation partial failure, got %v", warnings)
+	}
+}
+
+type cancelingQuoteProvider struct{}
+
+func (cancelingQuoteProvider) GetQuotes(ctx context.Context, req SwapRateRequest) ([]Quote, []string, error) {
+	return nil, nil, context.Canceled
+}
+
+func TestSwapRateHandler_CanceledRequest_NoGatewayError(t *testing.T) {
+	orig := quoteProvider
+	quoteProvider = cancelingQuoteProvider{}
+	defer func() { quoteProvider = orig }()
+
+	body := bytes.NewBufferString(`{"ticker_from":"BTC","ticker_to":"USDT","amount_from":"1"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/swaprate", body)
+	w := httptest.NewRecorder()
+
+	swapRateHandler(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("X-Request-Id"); !strings.HasPrefix(got, "RQ-") {
+		t.Fatalf("expected X-Request-Id header with RQ- prefix, got %q", got)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "" {
+		t.Fatalf("expected empty body on canceled request, got %q", got)
 	}
 }
 
@@ -298,7 +637,7 @@ func TestZeroXGetQuotes_Success(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "1")
-	quotes, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -315,6 +654,9 @@ func TestZeroXGetQuotes_Success(t *testing.T) {
 	if quotes[0].AmountTo != "200000000" {
 		t.Errorf("quote.AmountTo = %q, want \"200000000\"", quotes[0].AmountTo)
 	}
+	if quotes[0].AmountToUSD == "0" || quotes[0].AmountToUSD == "0.00" {
+		t.Errorf("quote.AmountToUSD should be non-zero, got %q", quotes[0].AmountToUSD)
+	}
 }
 
 func TestZeroXGetQuotes_ChainIDOverride(t *testing.T) {
@@ -327,7 +669,7 @@ func TestZeroXGetQuotes_ChainIDOverride(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "1") // provider default is chain 1
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -356,7 +698,7 @@ func TestZeroXGetQuotes_TakerOverride(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "1")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -378,7 +720,7 @@ func TestZeroXGetQuotes_InvalidTakerRejected(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "1")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -419,7 +761,7 @@ func TestZeroXGetQuotes_WETHFallback_Arbitrum(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "42161")
-	quotes, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -458,7 +800,7 @@ func TestZeroXGetQuotes_WETHFallback_BSC(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "56")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -494,7 +836,7 @@ func TestZeroXGetQuotes_WETHFallback_Base(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "8453")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -530,7 +872,7 @@ func TestZeroXGetQuotes_WETHFallback_Avalanche(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "43114")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
@@ -558,7 +900,7 @@ func TestZeroXGetQuotes_NonETH_NoFallback(t *testing.T) {
 	defer srv.Close()
 
 	p := newZeroXProvider(srv.URL, "42161")
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "DAI", // not ETH → no WETH fallback
 		TickerTo:   "USDC",
 		AmountFrom: "100",
@@ -585,13 +927,512 @@ func TestZeroXGetQuotes_MissingAPIKey(t *testing.T) {
 		chainID: "1",
 		taker:   defaultZeroXTaker,
 	}
-	_, err := p.GetQuotes(context.Background(), SwapRateRequest{
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
 		TickerFrom: "ETH",
 		TickerTo:   "USDC",
 		AmountFrom: "0.1",
 	})
 	if err == nil {
 		t.Error("expected error for missing API key, got nil")
+	}
+}
+
+func TestBuildProviderByName_ParaSwap(t *testing.T) {
+	p, ok := buildProviderByName("paraswap")
+	if !ok {
+		t.Fatal("buildProviderByName(paraswap) returned ok=false")
+	}
+	if _, ok := p.(*ParaSwapQuoteProvider); !ok {
+		t.Fatalf("buildProviderByName(paraswap) = %T, want *ParaSwapQuoteProvider", p)
+	}
+}
+
+func TestBuildProviderByName_OpenOcean(t *testing.T) {
+	t.Setenv("SWAP_OPENOCEAN_URL", "https://openocean.example")
+	t.Setenv("SWAP_OPENOCEAN_CHAIN_ID", "137")
+	t.Setenv("SWAP_OPENOCEAN_TIMEOUT_MS", "2500")
+
+	p, ok := buildProviderByName("openocean")
+	if !ok {
+		t.Fatal("buildProviderByName(openocean) returned ok=false")
+	}
+	oo, ok := p.(*OpenOceanQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(openocean) = %T, want *OpenOceanQuoteProvider", p)
+	}
+	if oo.baseURL != "https://openocean.example" {
+		t.Fatalf("openocean baseURL=%q want=%q", oo.baseURL, "https://openocean.example")
+	}
+	if oo.chainID != "137" {
+		t.Fatalf("openocean chainID=%q want=%q", oo.chainID, "137")
+	}
+	if oo.client == nil || oo.client.Timeout != 2500*time.Millisecond {
+		t.Fatalf("openocean timeout=%v want=%v", oo.client.Timeout, 2500*time.Millisecond)
+	}
+}
+
+func TestOpenOceanChainSlug(t *testing.T) {
+	cases := []struct {
+		chain string
+		want  string
+	}{
+		{chain: "1", want: "eth"},
+		{chain: "10", want: "optimism"},
+		{chain: "137", want: "polygon"},
+		{chain: "42161", want: "arbitrum"},
+		{chain: "56", want: "bsc"},
+		{chain: "8453", want: "base"},
+		{chain: "43114", want: "avax"},
+	}
+	for _, tc := range cases {
+		got, err := openOceanChainSlug(tc.chain)
+		if err != nil {
+			t.Fatalf("openOceanChainSlug(%q) unexpected error: %v", tc.chain, err)
+		}
+		if got != tc.want {
+			t.Fatalf("openOceanChainSlug(%q)=%q want=%q", tc.chain, got, tc.want)
+		}
+	}
+	if _, err := openOceanChainSlug("99999"); err == nil {
+		t.Fatal("expected error for unsupported chain id")
+	}
+}
+
+func TestOpenOceanGetQuotes_Success(t *testing.T) {
+	var seenPath string
+	var seenQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 200,
+			"data": map[string]any{
+				"inAmount":     "1000000000000000000",
+				"outAmount":    "300000000",
+				"estimatedGas": "123456",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OpenOceanQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, warnings, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].Provider != "openocean" {
+		t.Fatalf("provider=%q want=openocean", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "300000000" {
+		t.Fatalf("amount_to=%q want=300000000", quotes[0].AmountTo)
+	}
+	if !strings.Contains(seenPath, "/eth/swap") {
+		t.Fatalf("seen path=%q want to contain /eth/swap", seenPath)
+	}
+	if !contains(seenQuery, "inTokenAddress=") || !contains(seenQuery, "outTokenAddress=") || !contains(seenQuery, "amount=1") {
+		t.Fatalf("unexpected query=%q", seenQuery)
+	}
+}
+
+func TestBuildProviderByName_ExternalAlias(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_URL_FOO", "https://quotes.foo.example")
+	t.Setenv("SWAP_QUOTE_API_KEY_FOO", "abc123")
+	t.Setenv("SWAP_QUOTE_PATH_FOO", "/custom-quote")
+	t.Setenv("SWAP_QUOTE_TIMEOUT_MS_FOO", "2500")
+
+	p, ok := buildProviderByName("external:foo")
+	if !ok {
+		t.Fatal("buildProviderByName(external:foo) returned ok=false")
+	}
+	ext, ok := p.(*ExternalQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(external:foo) = %T, want *ExternalQuoteProvider", p)
+	}
+	if ext.baseURL != "https://quotes.foo.example" {
+		t.Fatalf("external baseURL=%q want=%q", ext.baseURL, "https://quotes.foo.example")
+	}
+	if ext.apiKey != "abc123" {
+		t.Fatalf("external apiKey=%q want=%q", ext.apiKey, "abc123")
+	}
+	if ext.path != "/custom-quote" {
+		t.Fatalf("external path=%q want=%q", ext.path, "/custom-quote")
+	}
+	if ext.client == nil || ext.client.Timeout != 2500*time.Millisecond {
+		t.Fatalf("external timeout=%v want=%v", ext.client.Timeout, 2500*time.Millisecond)
+	}
+}
+
+func TestBuildProviderByName_ExternalAliasMissingURL(t *testing.T) {
+	p, ok := buildProviderByName("external:nope")
+	if ok {
+		t.Fatalf("buildProviderByName(external:nope) expected ok=false, got provider=%T", p)
+	}
+}
+
+func TestNormalizeExternalQuotePath(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{in: "", want: "/quote"},
+		{in: "quote", want: "/quote"},
+		{in: "/quote", want: "/quote"},
+		{in: "  /v2/price  ", want: "/v2/price"},
+	}
+	for _, tc := range cases {
+		if got := normalizeExternalQuotePath(tc.in); got != tc.want {
+			t.Fatalf("normalizeExternalQuotePath(%q)=%q want=%q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestExternalHTTPTimeout(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_TIMEOUT_MS", "7000")
+	if got := externalHTTPTimeout(""); got != 7*time.Second {
+		t.Fatalf("externalHTTPTimeout(\"\")=%v want=%v", got, 7*time.Second)
+	}
+
+	t.Setenv("SWAP_QUOTE_TIMEOUT_MS_FOO", "900")
+	if got := externalHTTPTimeout("SWAP_QUOTE_TIMEOUT_MS_FOO"); got != 900*time.Millisecond {
+		t.Fatalf("externalHTTPTimeout(alias)=%v want=%v", got, 900*time.Millisecond)
+	}
+
+	t.Setenv("SWAP_QUOTE_TIMEOUT_MS_BAR", "oops")
+	if got := externalHTTPTimeout("SWAP_QUOTE_TIMEOUT_MS_BAR"); got != 7*time.Second {
+		t.Fatalf("externalHTTPTimeout(invalid alias)=%v want=%v", got, 7*time.Second)
+	}
+}
+
+func TestExternalCircuitConfig_AliasOverride(t *testing.T) {
+	t.Setenv("SWAP_QUOTE_CIRCUIT_FAILS", "5")
+	t.Setenv("SWAP_QUOTE_CIRCUIT_COOLDOWN_MS", "9000")
+	t.Setenv("SWAP_QUOTE_CIRCUIT_FAILS_FOO", "2")
+	t.Setenv("SWAP_QUOTE_CIRCUIT_COOLDOWN_MS_FOO", "1500")
+
+	fails, ttl := externalCircuitConfig("FOO")
+	if fails != 2 {
+		t.Fatalf("fails=%d want=2", fails)
+	}
+	if ttl != 1500*time.Millisecond {
+		t.Fatalf("ttl=%v want=%v", ttl, 1500*time.Millisecond)
+	}
+}
+
+func TestExternalCircuitStateFlow(t *testing.T) {
+	externalCircuit.Lock()
+	externalCircuit.state = make(map[string]externalCircuitState)
+	externalCircuit.Unlock()
+
+	key := "external:test"
+
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err != nil {
+		t.Fatalf("unexpected pre-attempt error before failures: %v", err)
+	}
+
+	externalCircuitRecordFailure(key, 2, 3*time.Second, time.Now())
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err != nil {
+		t.Fatalf("circuit should still be closed after first failure, got: %v", err)
+	}
+
+	externalCircuitRecordFailure(key, 2, 3*time.Second, time.Now())
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err == nil {
+		t.Fatal("expected open circuit error after threshold failures")
+	}
+
+	// Simulate cooldown elapsed and allow exactly one half-open probe.
+	externalCircuit.Lock()
+	s := externalCircuit.state[key]
+	s.openUntil = time.Now().Add(-time.Second)
+	s.halfOpenInFlight = false
+	externalCircuit.state[key] = s
+	externalCircuit.Unlock()
+
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err != nil {
+		t.Fatalf("expected first half-open probe to be allowed, got: %v", err)
+	}
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err == nil {
+		t.Fatal("expected second concurrent half-open attempt to be blocked")
+	}
+
+	// Failed half-open probe should reopen the circuit.
+	externalCircuitRecordFailure(key, 2, 3*time.Second, time.Now())
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err == nil {
+		t.Fatal("expected circuit reopened after failed half-open probe")
+	}
+
+	externalCircuitRecordSuccess(key)
+	if err := externalCircuitBeforeAttempt(key, time.Now()); err != nil {
+		t.Fatalf("circuit should be closed after success reset, got: %v", err)
+	}
+}
+
+func TestExternalQuoteProvider_GetQuotes_UsesProviderPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SwapRateResponse{
+			Quotes: []Quote{{Provider: "ext", AmountTo: "10", AmountFrom: "1"}},
+		})
+	}))
+	defer srv.Close()
+
+	p := &ExternalQuoteProvider{
+		client:  &http.Client{},
+		baseURL: srv.URL,
+		path:    "/v2/quote",
+	}
+
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{TickerFrom: "BTC", TickerTo: "USDT", AmountFrom: "1"})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if gotPath != "/v2/quote" {
+		t.Fatalf("request path=%q want=%q", gotPath, "/v2/quote")
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+}
+
+func TestParaSwapGetQuotes_Success(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	var seenRawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenRawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"priceRoute":{"srcAmount":"100000000","destAmount":"300000000","gasCostUSD":"0.13"}}`))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{
+		client:  &http.Client{},
+		baseURL: srv.URL,
+	}
+
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "BTC",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes: unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("GetQuotes returned %d quotes, want 1", len(quotes))
+	}
+	if quotes[0].Provider != "paraswap" {
+		t.Fatalf("provider=%q want paraswap", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "300000000" {
+		t.Fatalf("amount_to=%q want 300000000", quotes[0].AmountTo)
+	}
+	if quotes[0].AmountToUSD == "0" || quotes[0].AmountToUSD == "0.00" {
+		t.Fatalf("amount_to_usd should be non-zero, got %q", quotes[0].AmountToUSD)
+	}
+	if !contains(seenRawQuery, "network=1") {
+		t.Fatalf("expected network=1 in query, got %q", seenRawQuery)
+	}
+}
+
+func TestParaSwapGetQuotes_UnsupportedToken(t *testing.T) {
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: "http://unused"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "DOGE",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported token error, got nil")
+	}
+}
+
+func TestGetUSDPriceMap_UsesStaleCacheOnFetchFailure(t *testing.T) {
+	origClient := usdPriceClient
+	origPrices := usdPriceCache.prices
+	origUpdatedAt := usdPriceCache.updatedAt
+	origExpiry := usdPriceCache.expiresAt
+	defer func() {
+		usdPriceClient = origClient
+		usdPriceCache.prices = origPrices
+		usdPriceCache.updatedAt = origUpdatedAt
+		usdPriceCache.expiresAt = origExpiry
+	}()
+
+	usdPriceCache.prices = map[string]float64{"bitcoin": 100000}
+	usdPriceCache.updatedAt = time.Now().Add(-8 * time.Minute)
+	usdPriceCache.expiresAt = time.Now().Add(-time.Minute)
+	usdPriceClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+
+	prices, stale, staleAge, err := getUSDPriceMap(context.Background())
+	if err != nil {
+		t.Fatalf("getUSDPriceMap unexpected error: %v", err)
+	}
+	if !stale {
+		t.Fatal("expected stale=true when fetch fails and cache exists")
+	}
+	if staleAge < 1 {
+		t.Fatalf("expected stale age >=1 minute, got %d", staleAge)
+	}
+	if prices["bitcoin"] != 100000 {
+		t.Fatalf("expected stale bitcoin price, got %v", prices["bitcoin"])
+	}
+}
+
+func TestComputeQuoteUSDAmounts_StaleWarning(t *testing.T) {
+	origClient := usdPriceClient
+	origPrices := usdPriceCache.prices
+	origUpdatedAt := usdPriceCache.updatedAt
+	origExpiry := usdPriceCache.expiresAt
+	defer func() {
+		usdPriceClient = origClient
+		usdPriceCache.prices = origPrices
+		usdPriceCache.updatedAt = origUpdatedAt
+		usdPriceCache.expiresAt = origExpiry
+	}()
+
+	usdPriceCache.prices = map[string]float64{"bitcoin": 100000}
+	usdPriceCache.updatedAt = time.Now().Add(-12 * time.Minute)
+	usdPriceCache.expiresAt = time.Now().Add(-time.Minute)
+	usdPriceClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})}
+
+	toUSD, fromUSD, warnings := computeQuoteUSDAmounts(context.Background(), "BTC", "USDT", "100000000", "100000000000")
+	if toUSD == "0.00" || fromUSD == "0.00" {
+		t.Fatalf("expected non-zero usd values, got to=%s from=%s", toUSD, fromUSD)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.HasPrefix(w, usdPriceStaleWarning) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected stale warning prefix %q, got %v", usdPriceStaleWarning, warnings)
+	}
+}
+
+func TestBuildProviderByName_Odos(t *testing.T) {
+	t.Setenv("SWAP_ODOS_URL", "https://odos.example")
+	t.Setenv("SWAP_ODOS_CHAIN_ID", "137")
+	t.Setenv("SWAP_ODOS_TIMEOUT_MS", "3500")
+
+	p, ok := buildProviderByName("odos")
+	if !ok {
+		t.Fatal("buildProviderByName(odos) returned ok=false")
+	}
+	od, ok := p.(*OdosQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(odos) = %T, want *OdosQuoteProvider", p)
+	}
+	if od.baseURL != "https://odos.example" {
+		t.Fatalf("odos baseURL=%q want=%q", od.baseURL, "https://odos.example")
+	}
+	if od.chainID != "137" {
+		t.Fatalf("odos chainID=%q want=%q", od.chainID, "137")
+	}
+	if od.client == nil || od.client.Timeout != 3500*time.Millisecond {
+		t.Fatalf("odos timeout=%v want=%v", od.client.Timeout, 3500*time.Millisecond)
+	}
+}
+
+func TestOdosChainID(t *testing.T) {
+	cases := []struct {
+		chainID string
+		want    int
+		wantErr bool
+	}{
+		{chainID: "1", want: 1, wantErr: false},
+		{chainID: "137", want: 137, wantErr: false},
+		{chainID: "42161", want: 42161, wantErr: false},
+		{chainID: "invalid", want: 0, wantErr: true},
+		{chainID: "-1", want: 0, wantErr: true},
+	}
+	for _, tc := range cases {
+		got, err := odosChainID(tc.chainID)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("odosChainID(%q) expected error, got %d", tc.chainID, got)
+			}
+		} else {
+			if err != nil {
+				t.Fatalf("odosChainID(%q) unexpected error: %v", tc.chainID, err)
+			}
+			if got != tc.want {
+				t.Fatalf("odosChainID(%q)=%d want=%d", tc.chainID, got, tc.want)
+			}
+		}
+	}
+}
+
+func TestOdosGetQuotes_Success(t *testing.T) {
+	var seenBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("odos expected POST, got %s", r.Method)
+		}
+		var reqPayload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&reqPayload)
+		seenBody = fmt.Sprintf("%v", reqPayload)
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"statusCode":  200,
+			"description": "ok",
+			"quote": map[string]any{
+				"inAmounts":   []string{"1000000000000000000"},
+				"outAmounts":  []string{"2500000000"},
+				"gasEstimate": "150000",
+				"outTokens":   []string{"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := &OdosQuoteProvider{client: &http.Client{}, baseURL: srv.URL, chainID: "1"}
+	quotes, warnings, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("quotes len=%d want=1", len(quotes))
+	}
+	if quotes[0].Provider != "odos" {
+		t.Fatalf("provider=%q want=odos", quotes[0].Provider)
+	}
+	if quotes[0].AmountTo != "2500000000" {
+		t.Fatalf("amount_to=%q want=2500000000", quotes[0].AmountTo)
+	}
+	if !contains(seenBody, "chainId") {
+		t.Fatalf("request body missing chainId: %q", seenBody)
+	}
+	if !contains(seenBody, "inputTokens") {
+		t.Fatalf("request body missing inputTokens: %q", seenBody)
 	}
 }
 

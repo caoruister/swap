@@ -71,7 +71,8 @@ func (m *SwapUI) setStatusContent(msg SwapStatusRespMsg) string {
 		QRData string
 		QRCode string
 
-		Loading string
+		Loading  string
+		Warnings string
 	}
 	// NOTE: this is the time format used by the API
 	// 2025-03-19T11:16:02.958665Z
@@ -93,6 +94,9 @@ func (m *SwapUI) setStatusContent(msg SwapStatusRespMsg) string {
 	}
 	status.Status = m.formatStatus(data.Status)
 	status.Loading = m.sp.View()
+	if len(m.rateWarnings) > 0 {
+		status.Warnings = strings.Join(m.rateWarnings, ", ")
+	}
 
 	status.QRData = fmt.Sprintf("%s:%s?amount=%f", strings.ToLower(data.CoinFrom), strings.TrimSpace(data.AddressProvider), data.AmountFrom)
 	qr, err := qrcode.New(status.QRData, qrcode.Low)
@@ -150,7 +154,8 @@ func (m *SwapUI) setStatusContent(msg SwapStatusRespMsg) string {
 	Support ({{.SupportURL}})
 	TradeID {{.IdProvider}}
 	Provider {{.Provider}}
-	Chat (https://t.me/swapcli)
+	{{if .Warnings}}Warnings {{.Warnings}}
+	{{end}}Chat (https://t.me/swapcli)
 
 Can use this QR code to send {{.AmountFrom}} {{.TickerFrom}} to
 {{.AddressProvider}}
