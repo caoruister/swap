@@ -2211,6 +2211,9 @@ func (p *ParaSwapQuoteProvider) GetQuotes(ctx context.Context, req SwapRateReque
 	if err != nil {
 		return nil, nil, fmt.Errorf("unsupported to token: %w", err)
 	}
+	// ParaSwap API validates token addresses strictly; lowercase is required.
+	fromAddr = strings.ToLower(fromAddr)
+	toAddr = strings.ToLower(toAddr)
 
 	fromDecimals := tokenDecimalsForSymbol(fromSym)
 	toDecimals := tokenDecimalsForSymbol(toSym)
