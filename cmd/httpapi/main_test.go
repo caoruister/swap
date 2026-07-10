@@ -997,16 +997,6 @@ func TestZeroXGetQuotes_MissingAPIKey(t *testing.T) {
 	}
 }
 
-func TestBuildProviderByName_ParaSwap(t *testing.T) {
-	p, ok := buildProviderByName("paraswap")
-	if !ok {
-		t.Fatal("buildProviderByName(paraswap) returned ok=false")
-	}
-	if _, ok := p.(*ParaSwapQuoteProvider); !ok {
-		t.Fatalf("buildProviderByName(paraswap) = %T, want *ParaSwapQuoteProvider", p)
-	}
-}
-
 func TestBuildProviderByName_OpenOcean(t *testing.T) {
 	t.Setenv("SWAP_OPENOCEAN_URL", "https://openocean.example")
 	t.Setenv("SWAP_OPENOCEAN_CHAIN_ID", "137")
@@ -1628,6 +1618,205 @@ func TestParaSwapGetQuotes_UnsupportedToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected unsupported token error, got nil")
+	}
+}
+
+func TestParaSwapGetQuotes_NonJSONResponse(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>blocked</html>"))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-json response, got nil")
+	}
+}
+
+func TestParaSwapGetQuotes_Non200Status(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"upstream failed"}`))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for 502 status, got nil")
+	}
+	if !strings.Contains(err.Error(), "paraswap quote error 502") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParaSwapGetQuotes_MissingDestAmount(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"priceRoute":{"srcAmount":"100","destAmount":"","gasCostUSD":"0"}}`))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing destAmount, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing priceRoute.destAmount") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParaSwapGetQuotes_UnsupportedChain(t *testing.T) {
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: "http://unused"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "99999",
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported chain, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported chain id") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParaSwapGetQuotes_MissingAmountFrom(t *testing.T) {
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: "http://unused"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing amount_from, got nil")
+	}
+	if !strings.Contains(err.Error(), "paraswap requires amount_from") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParaSwapGetQuotes_MissingTickers(t *testing.T) {
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: "http://unused"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "",
+		TickerTo:   "",
+		AmountFrom: "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing tickers, got nil")
+	}
+	if !strings.Contains(err.Error(), "ticker_from and ticker_to are required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParaSwapGetQuotes_InvalidAmountFrom(t *testing.T) {
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: "http://unused"}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "BTC",
+		TickerTo:   "USDT",
+		AmountFrom: "not-a-number",
+		ChainID:    "1",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid amount_from, got nil")
+	}
+}
+
+func TestBuildProviderByName_ParaSwap(t *testing.T) {
+	p, ok := buildProviderByName("paraswap")
+	if !ok {
+		t.Fatal("buildProviderByName(paraswap) returned ok=false")
+	}
+	psp, ok := p.(*ParaSwapQuoteProvider)
+	if !ok {
+		t.Fatalf("buildProviderByName(paraswap) = %T, want *ParaSwapQuoteProvider", p)
+	}
+	if psp.client == nil {
+		t.Fatal("paraswap client is nil")
+	}
+	if psp.baseURL == "" {
+		t.Fatal("paraswap baseURL is empty")
+	}
+}
+
+func TestParaSwapGetQuotes_ChainIDOverride(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	var seenNetwork string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenNetwork = r.URL.Query().Get("network")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"priceRoute":{"srcAmount":"100000000","destAmount":"300000000","gasCostUSD":"0.13"}}`))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	_, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "10",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if seenNetwork != "10" {
+		t.Fatalf("network=%q want=10", seenNetwork)
+	}
+}
+
+func TestParaSwapGetQuotes_GasCostInWaste(t *testing.T) {
+	t.Setenv("SWAP_PARASWAP_CHAIN_ID", "1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"priceRoute":{"srcAmount":"100","destAmount":"200","gasCostUSD":"5.50"}}`))
+	}))
+	defer srv.Close()
+
+	p := &ParaSwapQuoteProvider{client: &http.Client{}, baseURL: srv.URL}
+	quotes, _, err := p.GetQuotes(context.Background(), SwapRateRequest{
+		TickerFrom: "ETH",
+		TickerTo:   "USDT",
+		AmountFrom: "1",
+		ChainID:    "1",
+	})
+	if err != nil {
+		t.Fatalf("GetQuotes unexpected error: %v", err)
+	}
+	if len(quotes) != 1 {
+		t.Fatalf("got %d quotes, want 1", len(quotes))
+	}
+	if quotes[0].Waste != "5.50" {
+		t.Fatalf("waste=%q want=5.50", quotes[0].Waste)
 	}
 }
 
